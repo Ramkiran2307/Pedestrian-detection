@@ -245,17 +245,21 @@ The idea: litter is something that **was not in the clean zone before, appears r
 
 Steps per frame, on a 640-px-wide copy for speed:
 
-1. **Warm-up (2 s):** learn the empty scene quickly (`accumulateWeighted`, α = 0.2), except under people/vehicles.
+1. **Warm-up (2 s):** sample about 8 frames per second and take the **per-pixel median** as the empty-scene background. Cars, bikes and shadows that only pass through, even ones YOLO missed, are removed by the median.
+   * **Never-seen-empty pixels:** for every pixel the detector counts how long it has been visible with nobody in front of it (`clean_time`). A spot that was hidden when the background was learned (a bike in the first frame, a person standing at the start) is *learned*, not reported, when it is uncovered. It must be seen empty for `learn_seconds` (0.5 s) before litter there can be reported. Without this, every object present in frame 0 left a "ghost" litter alarm when it moved away.
 2. **Difference:** blur the frame (5×5 Gaussian) and take the per-pixel max-channel absolute difference from the background. Pixels above `diff_threshold` (32) inside the zone polygon are foreground. Morphological open (3×3) removes noise and close (7×7) fills holes.
 3. **Mask actors:** every person/vehicle box, enlarged by `actor_margin` (12 %), is removed from the foreground, because people and cars are not litter.
 4. **Lighting guard:** if more than `global_change_ratio` (35 %) of the zone changes at once (lights on, cloud, camera bump), the background is reset instead of raising alerts.
-5. **Blobs:** connected components with an area between `min_area_px` (60) and `max_area_ratio` (2 % of the frame).
-6. **Candidate tracking:** blobs are matched to existing candidates by IoU, or by "the centre of one is inside the other" (a half-hidden object still matches).
+5. **Blobs:** changed regions closer than `group_px` (15 px) are **grouped into one blob**, so a dumped pile of bags, bottles and paper is one object, not ten. The blob's area is the number of really changed pixels, between `min_area_px` (60) and `max_area_ratio` (12 % of the frame, big enough for a pile of garbage bags).
+6. **Candidate tracking:** blobs are matched to existing candidates **best match first** (highest IoU first, then "the centre of one is inside the other", so a half-hidden object still matches). Greedy first-come matching let a small fragment steal a pile's match.
    * If it moved more than `max_drift_px` (12 px) it is still flying or rolling, so the clock restarts at the new spot.
    * `visible_time` grows only while the blob is **not** under a person/vehicle box seen in the last `actor_memory_seconds` (1 s). This stops a parked car that the detector briefly misses from becoming "litter".
    * When `visible_time ≥ static_seconds` (1.5 s), the candidate is **confirmed** and a `LitterEvent(t_appear, t_confirm, bbox)` is emitted once.
+   * **More litter added to a pile:** if an already-reported pile grows to `growth_ratio` (1.5×) its reported size and stays that big for `static_seconds`, a new `LitterEvent` is raised (`added_to_pile`). This is how the second dumper in the test footage is caught.
 7. **Occlusion handling:** a candidate hidden behind someone is kept, not deleted. A confirmed candidate survives `confirmed_miss_seconds` (4 s) of being unseen, so a passer-by walking over existing litter neither deletes it nor makes it count twice. (This was a real bug found in testing; see section 12.)
 8. **Background update:** slow (`bg_learning_rate` 0.02) everywhere except under actors and candidates. Confirmed litter is absorbed into the background after `absorb_after_seconds` (30 s), so it is not reported again; by then the case is on the dashboard and the cleanup task exists.
+
+After a `LitterEvent`, the pipeline **merges** events that belong to one dumping act (`merge_seconds`, 8 s): a new event joins a recent incident if it involves the same person or vehicle, *or that one's linked rider/driver*, or if it lies right next to litter just reported while one side has no suspect. The car and the passenger who stepped out of it therefore become one incident with both photos, not two.
 
 Why not a trained trash detector? It needs a large labelled dataset of Indian street litter and still misses unusual items. The static-object method catches *any* object regardless of type, which matches the "any kind of trash" requirement. Its weaknesses are listed in section 15.
 
@@ -286,7 +290,9 @@ This runs only in the background worker, and only for offending vehicles:
    Every layout that fits the string's length is tried. Characters are fixed **by slot type**: a letter slot turns `0→O, 1→I, 8→B, 5→S…` and a digit slot turns `O→0, I→1, B→8, S→5…`. The state code must be a real one (`KA`, `MH`, `DL`, `TN`, … 39 codes). A leading `IND` (from high-security plates) is stripped. The layout needing the fewest fixes wins (at most 3).
 6. **Vote** across all crops and variants: weight = OCR confidence × detection confidence (× 0.35 if the format is invalid). The reported confidence = mean OCR confidence × agreement.
 
-If the format is still invalid, the raw text is kept and the dashboard asks the officer to correct it. A notice for a vehicle cannot be issued without a valid plate.
+If the format is still invalid, the plate is sent as **not read**: the number stays empty, the raw OCR guesses are kept for reference and `plate.jpg` is attached, and the dashboard shows "NOT READ" so the officer can type the number in from the photo. Before this change, garbage such as `TL2` was stored as if it were a plate. A notice for a vehicle cannot be issued until a valid plate is entered.
+
+How big a plate must be: OCR needs the characters to be roughly 15–20 px tall. In the 848×478 test footage the car's plate is about 55×24 px, with characters about 10 px tall. No OCR can read that reliably, so the officer correction path is what handles it. Use a higher-resolution camera, or mount it closer to the road, to get plates read automatically.
 
 ### 6.7 Evidence (`evidence.py`)
 
@@ -333,6 +339,7 @@ HOST=0.0.0.0 LW_API_KEY=<secret> python -m server.app   # reachable by the Pi
 | `LW_DASHBOARD_DIR` | `dashboard/dist` | Built dashboard |
 | `LW_MUNICIPALITY` | `Demo Municipal Corporation` | Printed on notices |
 | `LW_TIMEZONE` | `Asia/Kolkata` | Daily/hourly statistics |
+| `LW_DEV_TOOLS` | `1` | Show the "Test with your own footage" upload on the dashboard (`0` = off) |
 | `HOST`, `PORT` | `127.0.0.1`, `5000` | Listen address |
 
 ### API
@@ -348,6 +355,9 @@ HOST=0.0.0.0 LW_API_KEY=<secret> python -m server.app   # reachable by the Pi
 | GET | `/api/v1/cameras` | dashboard | Cameras + online flag |
 | GET | `/api/v1/settings` | dashboard | Municipality, fine schedule, due days |
 | GET | `/media/<uid>/<file>` | dashboard | Evidence files |
+| POST | `/api/v1/dev/jobs` | dashboard (dev) | Upload a video (`video`, `full_frame=1/0`); it is processed by the edge pipeline |
+| GET | `/api/v1/dev/jobs` | dashboard (dev) | Upload jobs with progress, incidents found, errors |
+| POST | `/api/v1/dev/jobs/<id>/cancel` | dashboard (dev) | Stop a running job |
 
 Invalid actions return **409** with a readable message (e.g. *"'issue notice' is not allowed while the case is pending review"*), which the dashboard shows as a toast.
 
@@ -424,6 +434,18 @@ Design notes:
 * Works at phone width without sideways scrolling.
 * The **acting officer** name (top bar) is required before any action and goes into the audit trail.
 
+### Test with your own footage (development tool)
+
+At the bottom of the Overview page there is an upload panel:
+
+1. Choose or drop a video (MP4, AVI, MOV, MKV, WebM; up to 1 GB).
+2. Leave **"Treat the whole frame as the clean zone"** ticked for new footage, or untick it to use the polygon in `edge/config.yaml`.
+3. Click **Upload & process**.
+
+What happens: the server saves the file under `server/data/dev_jobs/<job>/` and runs the normal edge pipeline on it in a background process (`python -m edge.run --progress …`) as camera **`DEV-UPLOAD`**. The panel shows the frame progress, fps, incidents found and passers-by binned. **Watch** opens the live annotated feed while it runs (preview on port 8091). Incidents are uploaded through the normal API as they are found, and when the job finishes the dashboard refreshes itself and shows a toast. **View incidents** opens the register filtered to `camera=DEV-UPLOAD`. If processing fails, the error and the last log lines are shown in the panel, and the full log is in `server/data/dev_jobs/<job>/run.log`. Jobs run one at a time; extra uploads wait in a queue.
+
+This is meant for the development phase only. Turn it off with `LW_DEV_TOOLS=0` before putting the server on a shared network, because anyone who can open the dashboard can make the server process videos.
+
 Development: `cd dashboard && npm install && npm run dev` → http://localhost:5173 (proxies `/api` and `/media` to Flask). Production: `npm run build`; Flask serves `dashboard/dist`. The built `dist/` is committed so the demo laptop doesn't need Node.js.
 
 ---
@@ -465,6 +487,8 @@ What you should see with the demo video:
 
 Both incidents appear in the Offence register about 15 s after detection.
 
+**Or skip the terminal:** with only the server running, use **Test with your own footage** at the bottom of the Overview page (section 9) to upload any video; the dashboard updates by itself when it's done.
+
 ---
 
 ## 11. Moving to the Raspberry Pi
@@ -499,7 +523,7 @@ camera:  { source: "0", frame_stride: 2 }
 ## 12. Testing and results
 
 ```bash
-pytest                                  # 28 unit tests (~10 s)
+pytest                                  # 32 unit tests (~15 s)
 RUN_E2E=1 pytest tests/test_end_to_end.py   # full pipeline on the demo video (~2-3 min)
 cd dashboard && npm run build           # typecheck + build
 ```
@@ -508,8 +532,8 @@ cd dashboard && npm run build           # typecheck + build
 |---|---|
 | `test_plates.py` | Indian format normalisation, OCR confusion fixes, IND prefix, Delhi formats, BH series, two-line joining |
 | `test_cache_and_attribution.py` | Bin after hold time, pinned → pushed, best-crop selection, nearest actor blamed, bystander ignored, rider ↔ motorcycle link |
-| `test_litter.py` | Static object reported once and on time, moving person ignored, object under a standing person reported after they leave, short-lived object ignored, lighting change resets |
-| `test_server.py` | API key, upload + evidence, idempotent uid, input validation, full workflow, reject reason/reopen, plate correction, unattributed cleanup-only, filters/stats/heartbeat |
+| `test_litter.py` | Static object reported once and on time, moving person ignored, object under a standing person reported after they leave, short-lived object ignored, lighting change resets, scattered pile = one event + additions to it = a new event, someone present in the first frame leaves no ghost |
+| `test_server.py` | API key, upload + evidence, idempotent uid, input validation, full workflow, reject reason/reopen, plate correction, unattributed cleanup-only, filters/stats/heartbeat, dev video upload validation and on/off switch |
 | `test_end_to_end.py` | Real models on the synthetic video: exactly one person and one vehicle incident, plate read correctly, passer-by binned, evidence files present |
 
 **End-to-end results** (synthetic video, 4-core laptop CPU):
@@ -528,6 +552,16 @@ cd dashboard && npm run build           # typecheck + build
 2. The plate text in the synthetic video overflowed the plate, so the plate detector missed it. Fixed in the generator (the real pipeline was fine).
 3. `mp4v` clips don't play in browsers. Switched to H.264 through ffmpeg (6–11 MB → 0.2 MB per clip).
 
+**Real footage (`past/test_video.mp4`, 848×478, 10 s, a man dumps garbage bags at the kerb, then a car stops and its passenger dumps more):**
+
+| Version | Result |
+|---|---|
+| First version | 2 incidents, both wrong: the pile of bags was ignored (bigger than the old 2 % limit), only a scrap of paper was reported, and the plate was stored as `TL2` |
+| First version, whole-frame zone | 4 incidents: the 2 above plus 2 ghosts from a bike and pedestrians present in the first frames |
+| **Fixed** (both zone settings) | **2 incidents, both correct**: ① the man (P4), pile appeared 3.9 s, confirmed 5.4 s, fragments merged; ② the car (V64) + its passenger (P73) linked, with car, person and plate photos, plate "not read" (too small, see 6.6). 55 passers-by binned. About 7 fps on CPU, 47 s per upload including model loading. |
+
+Fixes that came out of this footage: fragment grouping and a larger size limit (6.4 step 5), best-first matching and pile-growth events (step 6), the median warm-up and never-seen-empty pixels (step 1), merging by linked actor, and "not read" plates (6.6).
+
 The synthetic video proves the logic, not real-world accuracy. Record a few minutes of real footage at the actual site and tune with it (section 13).
 
 ---
@@ -543,7 +577,11 @@ The synthetic video proves the logic, not real-world accuracy. Record a few minu
 | Thrown-from-vehicle litter is unattributed | Raise `vehicle_max_distance` (2.0) and `lookback_seconds` (3.5); `hold_seconds` rises automatically |
 | Plates not read | Mount the camera so plates are at least ~20 px tall; raise `cache.vehicle_crops`; lower `models.plate.conf` to 0.15 |
 | Too slow | See section 11 |
-| Same litter reported twice | Raise `confirmed_miss_seconds` and `absorb_after_seconds` |
+| Same litter reported twice | Raise `confirmed_miss_seconds`, `absorb_after_seconds` and `merge_seconds` |
+| One dumping act split into several incidents | Raise `group_px` (e.g. 25) and `merge_seconds` |
+| Big piles / garbage bags not reported | Raise `max_area_ratio` (e.g. 0.2) |
+| Litter added to an existing pile is missed | Lower `growth_ratio` (e.g. 1.3) |
+| False litter where something stood at the start of the video | Raise `warmup_seconds` (3–4 s) or `learn_seconds` |
 
 ---
 

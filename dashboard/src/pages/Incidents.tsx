@@ -25,6 +25,7 @@ export default function Incidents() {
     from: params.get("from") || "",
     to: params.get("to") || "",
     q: params.get("q") || "",
+    camera: params.get("camera") || "",
   };
   const key = JSON.stringify({ ...filters, page });
   const list = usePolling(() => api.incidents({ ...filters, page, page_size: 15 }), [key], 6000);
@@ -90,6 +91,10 @@ export default function Incidents() {
           <input type="date" className="input" style={{ width: "auto" }} value={filters.to} aria-label="To date"
                  onChange={(e) => update({ to: e.target.value })} />
           {filters.overdue && <span className="badge overdue">Overdue only</span>}
+          {filters.camera && (
+            <button className="badge neutral" style={{ border: 0, cursor: "pointer" }} onClick={() => update({ camera: "" })}
+                    title="Remove camera filter">Camera: {filters.camera} <X /></button>
+          )}
           {anyFilter && (
             <button className="btn ghost" onClick={() => { setQ(""); setParams({}, { replace: true }); }}>
               <X /> Clear

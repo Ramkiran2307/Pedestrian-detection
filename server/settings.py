@@ -5,6 +5,7 @@
   LW_DASHBOARD_DIR    built React app to serve at / (dashboard/dist)
   LW_MUNICIPALITY     name printed on notices
   LW_TIMEZONE         used for daily/hourly statistics (Asia/Kolkata)
+  LW_DEV_TOOLS        1 (default) = dashboard can upload a video for processing; 0 = off
   PORT / HOST         where to listen (5000 / 127.0.0.1)
 """
 from __future__ import annotations
@@ -28,6 +29,11 @@ class Settings:
     notice_due_days: int = 15
     camera_online_seconds: int = 60
     max_upload_mb: int = 64
+    port: int = field(default_factory=lambda: int(os.environ.get("PORT", 5000)))
+    # Development-phase video upload (dashboard -> edge pipeline on this machine)
+    dev_tools: bool = field(default_factory=lambda: os.environ.get("LW_DEV_TOOLS", "1") != "0")
+    dev_max_upload_mb: int = 1024
+    dev_preview_port: int = 8091
     # Sample spot-fine schedule (INR). Real amounts come from each city's SWM bye-laws.
     fines: dict[str, int] = field(default_factory=lambda: {
         "person": 500, "two_wheeler": 1000, "car": 2000, "heavy": 5000, "unknown": 0,

@@ -101,6 +101,26 @@ export interface Settings {
   currency: string;
   fines: Record<string, number>;
   notice_due_days: number;
+  dev_tools?: boolean;
+}
+
+export interface DevJob {
+  id: string;
+  filename: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  full_frame: boolean;
+  created: number;
+  started: number | null;
+  finished: number | null;
+  frames: number;
+  total_frames: number;
+  percent: number | null;
+  fps: number | null;
+  incidents: number;
+  uploaded: number;
+  binned: number;
+  error: string | null;
+  log_tail: string[];
 }
 
 export class ApiError extends Error {
@@ -135,6 +155,30 @@ export const api = {
   incident: (id: number | string) => request<IncidentDetail>(`/api/v1/incidents/${id}`),
   act: (id: number, body: Record<string, unknown>) =>
     request<IncidentDetail>(`/api/v1/incidents/${id}/actions`, { method: "POST", body: JSON.stringify(body) }),
+  devJobs: () => request<DevJob[]>("/api/v1/dev/jobs"),
+  cancelDevJob: (id: string) => request<DevJob>(`/api/v1/dev/jobs/${id}/cancel`, { method: "POST" }),
+  // XMLHttpRequest instead of fetch so the upload can report progress.
+  uploadVideo: (file: File, fullFrame: boolean, onProgress: (pct: number) => void) =>
+    new Promise<DevJob>((resolve, reject) => {
+      const form = new FormData();
+      form.append("video", file);
+      form.append("full_frame", fullFrame ? "1" : "0");
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/v1/dev/jobs");
+      xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(Math.round((e.loaded / e.total) * 100));
+      xhr.onload = () => {
+        let body: { error?: string } = {};
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {
+          /* not JSON */
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(body as DevJob);
+        else reject(new ApiError(xhr.status, body.error || `Upload failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new ApiError(0, "Network error while uploading"));
+      xhr.send(form);
+    }),
 };
 
 // ---------------------------------------------------------------- formatting

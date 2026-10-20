@@ -49,6 +49,7 @@ class VideoSource:
         self.max_width = max_width
         self.loop = loop and not self.is_live
         self.index = 0
+        self.total = 0 if self.is_live else int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         self.loops = 0
         self.t0 = time.monotonic()
 
@@ -89,12 +90,18 @@ class Pipeline:
         self.ring = FrameRing(cfg.ring_seconds, cfg.evidence.clip_width, cfg.evidence.jpeg_quality)
         self.uploader = Uploader(cfg, self.stats) if use_server and cfg.server.enabled else None
         self.worker = IncidentWorker(cfg, self.cache, on_ready=self.uploader.notify if self.uploader else None)
-        self.preview = PreviewServer(cfg.preview.host, cfg.preview.port, cfg.preview.width) \
-            if cfg.preview.enabled else None
+        self.preview = None
+        if cfg.preview.enabled:
+            try:
+                self.preview = PreviewServer(cfg.preview.host, cfg.preview.port, cfg.preview.width)
+            except OSError as e:  # port already used (e.g. another edge run): carry on without it
+                log.warning("live preview disabled: cannot listen on %s:%d (%s)",
+                            cfg.preview.host, cfg.preview.port, e)
         self.show = show or cfg.preview.show_window
         self.output_video = output_video
         self.writer: cv2.VideoWriter | None = None
         self.pending: list[PendingIncident] = []
+        self.recent: list[PendingIncident] = []
         self.incidents = 0
         self.unattributed = 0
         self.frames = 0
@@ -115,7 +122,9 @@ class Pipeline:
         }
 
     # -------------------------------------------------------------------- loop
-    def run(self, max_frames: int | None = None) -> dict:
+    def run(self, max_frames: int | None = None, progress=None) -> dict:
+        """Process the source until it ends. ``progress(stats)`` is called about once a second
+        (stats include ``position`` and ``total`` frames for video files)."""
         c = self.cfg.camera
         src = VideoSource(c.source, c.realtime, c.frame_stride, c.max_width, c.loop)
         log.info("source %s (%s, %.1f fps, %s clock)", c.source, "live" if src.is_live else "file",
@@ -126,7 +135,7 @@ class Pipeline:
         if self.preview:
             self.preview.start()
             log.info("live preview: http://%s:%d/stream.mjpg", self.cfg.preview.host, self.cfg.preview.port)
-        tick = time.monotonic()
+        tick = last_report = time.monotonic()
         try:
             while max_frames is None or self.frames < max_frames:
                 item = src.read()
@@ -138,6 +147,9 @@ class Pipeline:
                 now = time.monotonic()
                 self.fps = 0.9 * self.fps + 0.1 * (1.0 / max(now - tick, 1e-6)) if self.frames > 1 else 0.0
                 tick = now
+                if progress and now - last_report >= 1.0:
+                    last_report = now
+                    progress({**self.stats(), "position": src.index, "total": src.total})
                 if self.show:
                     cv2.imshow("Litter watch", self.annotated)
                     if cv2.waitKey(1) & 0xFF in (27, ord("q")):
@@ -147,6 +159,8 @@ class Pipeline:
         finally:
             src.release()
             self.shutdown()
+            if progress:
+                progress({**self.stats(), "position": src.index, "total": src.total, "finished": True})
         return self.stats()
 
     def step(self, frame: np.ndarray, t: float) -> None:
@@ -189,8 +203,11 @@ class Pipeline:
                 log.info("litter at %s with nobody nearby - ignored", [round(v) for v in ev.bbox])
                 return
         top = suspects[0] if suspects else None
-        offender = freeze_actor(top.record, top.score) if top else None
         link_rec = linked_actor(self.cache, top) if top else None
+        involved = [r for r in (top.record if top else None, link_rec) if r]
+        if self._merge_into_recent(ev, involved):
+            return
+        offender = freeze_actor(top.record, top.score) if top else None
         linked = freeze_actor(link_rec, 0.0) if link_rec else None
         for a in (offender, linked):
             if a:
@@ -210,9 +227,36 @@ class Pipeline:
             collect_until=ev.t_confirm + cfg.evidence.post_seconds,
         )
         self.pending.append(inc)
+        self.recent.append(inc)
         self.incidents += 1
         log.info("LITTER confirmed at t=%.1fs (appeared %.1fs) -> %s", ev.t_confirm, ev.t_appear,
                  f"{offender.kind} {offender.key} (score {offender.score:.2f})" if offender else "no suspect")
+
+    def _merge_into_recent(self, ev, involved: list) -> bool:
+        """One dumping act often shows up as several pieces (bag, bottles, paper) confirmed
+        a moment apart, sometimes pinned on the car and sometimes on the passenger who got
+        out of it. Pieces involving the same people/vehicles, or lying right next to litter
+        that was just reported, within merge_seconds belong to the incident already opened."""
+        window = self.cfg.litter.merge_seconds
+        actors = {r.key for r in involved}
+        self.recent = [r for r in self.recent if ev.t_confirm - r.t_confirm <= window]
+        for inc in reversed(self.recent):
+            inc_actors = {a.key for a in (inc.offender, inc.linked) if a}
+            same_actors = bool(actors & inc_actors)
+            near = any(_near(ev.bbox, b) for b in [inc.litter_box, *inc.more_litter])
+            if not (same_actors or (near and (not actors or not inc_actors))):
+                continue
+            if not inc.done:
+                inc.more_litter.append(ev.bbox)
+                # e.g. the car was blamed first and now its passenger is seen dumping: keep both
+                extra = next((r for r in involved if r.key not in inc_actors and inc.offender
+                              and r.kind != inc.offender.kind), None)
+                if extra and inc.linked is None:
+                    inc.linked = freeze_actor(extra, 0.0)
+                    self.cache.pin(extra)
+            log.info("LITTER at t=%.1fs merged into incident %s (same dumping act)", ev.t_confirm, inc.uid)
+            return True
+        return False
 
     # ----------------------------------------------------------------- drawing
     def _draw(self, frame: np.ndarray, dets: list[Detection], litter_items) -> np.ndarray:
@@ -264,3 +308,9 @@ class Pipeline:
         if self.show:
             cv2.destroyAllWindows()
         log.info("done: %s", self.stats())
+
+
+def _near(a, b) -> bool:
+    """Boxes touch once each is grown by its own size (fragments of one pile)."""
+    from .geometry import expand, intersection
+    return intersection(expand(a, 1.0), expand(b, 1.0)) > 0

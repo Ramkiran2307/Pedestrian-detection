@@ -4,6 +4,7 @@
     python -m edge.run --source samples/demo_litter.mp4 --show
     python -m edge.run --source 0                       # laptop webcam
     python -m edge.run --no-server --output-video output/annotated.mp4
+    python -m edge.run --source clip.mp4 --override '{"zone": {"polygon": []}}' --progress
 """
 from __future__ import annotations
 
@@ -26,6 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--output-video", help="also save the annotated video to this file")
     ap.add_argument("--max-frames", type=int)
     ap.add_argument("--realtime", choices=["auto", "yes", "no"], default="auto")
+    ap.add_argument("--override", help='JSON merged into the config, e.g. \'{"zone": {"polygon": []}}\'')
+    ap.add_argument("--progress", action="store_true",
+                    help="print '@@PROGRESS {json}' lines (used by the dashboard's video upload)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -34,10 +38,10 @@ def main(argv: list[str] | None = None) -> int:
     for noisy in ("ultralytics", "urllib3", "PIL", "matplotlib"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    overrides = {}
+    overrides = json.loads(args.override) if args.override else {}
     if args.source:
         src = str(Path(args.source).resolve()) if Path(args.source).exists() else args.source
-        overrides["camera"] = {"source": src}
+        overrides.setdefault("camera", {})["source"] = src
     cfg = load_config(args.config, overrides)
     if args.no_preview:
         cfg.preview.enabled = False
@@ -46,8 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_video:
         Path(args.output_video).parent.mkdir(parents=True, exist_ok=True)
 
+    def report(stats: dict) -> None:
+        print("@@PROGRESS " + json.dumps(stats), flush=True)
+
     stats = Pipeline(cfg, use_server=not args.no_server, show=args.show,
-                     output_video=args.output_video).run(args.max_frames)
+                     output_video=args.output_video).run(args.max_frames, report if args.progress else None)
     print(json.dumps(stats, indent=2))
     return 0
 

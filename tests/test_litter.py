@@ -80,3 +80,27 @@ def test_lighting_change_resets_instead_of_alerting():
         f = np.full((H, W, 3), level, np.uint8)
         events += det.update(f, i / FPS, [])
     assert events == [] and det.resets >= 1
+
+
+def test_scattered_pile_is_one_incident_and_additions_are_new_litter():
+    rng = np.random.default_rng(3)
+    base, _ = scene(rng)
+    det = LitterDetector(LitterCfg(work_width=640, min_area_px=40), Zone("z", []))
+    pile = [(300, 300), (322, 302), (310, 318)]          # bag + bottle + paper, a few px apart
+    added = pile + [(344, 306), (352, 322), (334, 330)]  # someone dumps more next to it
+    events = []
+    for i in range(160):
+        t = i / FPS
+        objects = () if t < 3 else (pile if t < 9 else added)
+        f = frame_with(base, rng, objects)
+        events += [(t, e) for e in det.update(f, t, [])]
+    assert len(events) == 2                               # the pile once, then the addition
+    assert not events[0][1].extra and events[1][1].extra.get("added_to_pile")
+    assert events[1][1].t_appear >= 9.0
+
+
+def test_actor_present_in_first_frame_leaves_no_ghost_litter():
+    # someone stands in view from frame 0 (so the first background contains them), then leaves
+    steps = [((), (280, 150, 340, 330))] * 40
+    steps += [((), None)] * 40
+    assert run(steps) == []

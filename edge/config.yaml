@@ -38,9 +38,12 @@ zone:
 litter:
   work_width: 640             # litter analysis resolution
   warmup_seconds: 2.0         # time to learn the empty scene
+  learn_seconds: 0.5          # a spot must be seen empty this long before litter there is reported
   diff_threshold: 32          # pixel difference (0-255) that counts as "changed"
   min_area_px: 60             # smallest litter blob (at work_width)
-  max_area_ratio: 0.02        # largest blob, as a fraction of the frame
+  max_area_ratio: 0.12        # largest blob (a dumped pile of bags), as a fraction of the frame
+  group_px: 15                # pieces closer than this (px at work_width) count as one pile
+  growth_ratio: 1.5           # a reported pile that grows 1.5x = new litter added to it
   static_seconds: 1.5         # must stay still this long to count as litter
   max_drift_px: 12
   miss_tolerance_seconds: 0.6
@@ -50,6 +53,7 @@ litter:
   bg_learning_rate: 0.02
   global_change_ratio: 0.35   # >35% of the zone changed at once = lighting change
   absorb_after_seconds: 30
+  merge_seconds: 8            # more litter by the same offender within 8 s = same incident
 
 cache:
   hold_seconds: 4.0           # keep each person/vehicle 4 s after it leaves, then bin it

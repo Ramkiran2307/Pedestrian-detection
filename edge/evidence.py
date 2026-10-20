@@ -97,6 +97,7 @@ class PendingIncident:
     frames: list[FrameEntry]
     collect_until: float
     done: bool = False
+    more_litter: list[Box] = field(default_factory=list)   # extra pieces merged into this incident
     extra: dict = field(default_factory=dict)
 
     @property
@@ -129,9 +130,9 @@ def render(entry: FrameEntry, inc: PendingIncident | None, header: str, plate_te
             _label(img, tag, x1, y1, COLORS["offender"])
         else:
             cv2.rectangle(img, (x1, y1), (x2, y2), COLORS["muted"], 1)
-    if inc:
-        x1, y1, x2, y2 = (int(v) for v in scale(inc.litter_box, s))
-        if entry.t >= inc.t_appear:
+    if inc and entry.t >= inc.t_appear:
+        for box in [inc.litter_box, *inc.more_litter]:
+            x1, y1, x2, y2 = (int(v) for v in scale(box, s))
             cv2.rectangle(img, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), COLORS["litter"], 2)
             _label(img, "LITTER", x1 - 4, y1 - 6, COLORS["litter"])
     cv2.rectangle(img, (0, 0), (img.shape[1], 24), (20, 20, 20), -1)
@@ -237,7 +238,7 @@ class IncidentWorker(threading.Thread):
 
         stamp = inc.occurred_at.astimezone().strftime("%d-%m-%Y %H:%M:%S")
         header = f"{cam.id} | {self.cfg.zone.name} | {stamp}"
-        rendered = [render(e, inc, header, plate.pretty) for e in inc.frames]
+        rendered = [render(e, inc, header, plate.pretty if plate.valid else None) for e in inc.frames]
         # Scene snapshot: the moment the litter first appeared, with the offender marked.
         scene_idx = min(range(len(inc.frames)), key=lambda i: abs(inc.frames[i].t - inc.t_appear)) if inc.frames else None
         if scene_idx is not None:
@@ -270,10 +271,15 @@ class IncidentWorker(threading.Thread):
             "vehicle_category": VEHICLE_CATEGORY.get(vehicle.cls_name) if vehicle else None,
             "linked_track": inc.linked.key if inc.linked else None,
             "plate": {
-                "text": plate.text, "pretty": plate.pretty, "confidence": plate.confidence,
-                "valid": plate.valid, "raw": plate.raw[:12], "detections": plate.detections,
+                # An unreadable plate is sent as "not read" (with the raw OCR guesses) so the
+                # officer types it in from plate.jpg, instead of a wrong number being stored.
+                "text": plate.text if plate.valid else None,
+                "pretty": plate.pretty if plate.valid else None,
+                "confidence": plate.confidence, "valid": plate.valid,
+                "raw": plate.raw[:12], "detections": plate.detections,
             } if vehicle else None,
             "litter_bbox": [round(v, 1) for v in inc.litter_box],
+            "more_litter": [[round(v, 1) for v in b] for b in inc.more_litter],
             "suspects": inc.suspects,
             "files": files,
             "edge_version": "1.0",
@@ -282,7 +288,7 @@ class IncidentWorker(threading.Thread):
         final = Path(self.cfg.evidence.outbox_dir) / inc.uid
         tmp.rename(final)   # atomic: the uploader only ever sees complete folders
         log.info("incident %s ready: %s %s plate=%s", inc.uid, meta["offender_type"],
-                 off.key if off else "-", plate.text)
+                 off.key if off else "-", plate.text if plate.valid else ("not read" if vehicle else "-"))
         if self.on_ready:
             self.on_ready(final)
         return final
