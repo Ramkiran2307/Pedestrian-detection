@@ -11,3 +11,4 @@ samples/*.mp4
 samples/*.webm
 !samples/.gitkeep
 output/
+*.tsbuildinfo
