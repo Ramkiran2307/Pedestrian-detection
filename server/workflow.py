@@ -68,7 +68,8 @@ def apply_action(conn: sqlite3.Connection, settings: Settings, incident: dict, b
     if action in TRANSITIONS:
         allowed, new_status = TRANSITIONS[action]
         if incident["status"] not in allowed:
-            raise WorkflowError(f"Cannot {action.replace('_', ' ')} an incident that is {incident['status']}")
+            raise WorkflowError(f"'{action.replace('_', ' ')}' is not allowed while the case is "
+                                f"{incident['status'].replace('_', ' ')}")
         if action == "issue_notice" and incident["offender_type"] == "unknown":
             raise WorkflowError("No offender was identified; only cleanup can be tracked")
         updates["status"] = new_status

@@ -294,8 +294,7 @@ def create_app(settings: Settings | None = None) -> Flask:
             "plate_number, plate_display, due_date FROM incidents")]
         now_utc = datetime.now(timezone.utc)
         today = now_utc.astimezone(tz).date()
-        days = int(request.args.get("days", 14))
-        days = min(90, max(7, days))
+        days = min(90, max(7, request.args.get("days", 14, type=int)))
         by_status = Counter(r["status"] for r in rows)
         by_type = Counter(r["offender_type"] for r in rows)
         daily = {(today - timedelta(days=i)).isoformat(): {"person": 0, "vehicle": 0, "unknown": 0}
