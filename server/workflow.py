@@ -80,7 +80,7 @@ def apply_action(conn: sqlite3.Connection, settings: Settings, incident: dict, b
                 raise WorkflowError("A reason is required to reject an incident")
             updates["rejection_reason"] = reason
         if action == "issue_notice":
-            if incident["offender_type"] == "vehicle" and not incident.get("plate_number"):
+            if incident["offender_type"] == "vehicle" and not (incident.get("plate_number") and incident.get("plate_valid")):
                 raise WorkflowError("Add or correct the number plate before issuing a notice")
             amount = body.get("fine_amount")
             amount = fine_for(settings, incident) if amount in (None, "") else int(amount)

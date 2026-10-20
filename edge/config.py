@@ -62,9 +62,12 @@ class ZoneCfg:
 class LitterCfg:
     work_width: int = 640
     warmup_seconds: float = 2.0
+    learn_seconds: float = 0.5
     diff_threshold: int = 32
     min_area_px: int = 60
-    max_area_ratio: float = 0.02
+    max_area_ratio: float = 0.12
+    group_px: int = 15
+    growth_ratio: float = 1.5
     static_seconds: float = 1.5
     max_drift_px: float = 12.0
     miss_tolerance_seconds: float = 0.6
@@ -74,6 +77,7 @@ class LitterCfg:
     bg_learning_rate: float = 0.02
     global_change_ratio: float = 0.35
     absorb_after_seconds: float = 30.0
+    merge_seconds: float = 8.0
 
 
 @dataclass

@@ -121,3 +121,22 @@ def test_filters_stats_and_heartbeat(client):
     assert r.status_code == 200
     cams = client.get("/api/v1/cameras").get_json()
     assert cams[0]["online"] and cams[0]["stats"]["fps"] == 6 and cams[0]["incidents"] == 3
+
+
+def test_dev_upload_validation(tmp_path):
+    s = Settings(api_key=KEY, data_dir=tmp_path, dashboard_dir=tmp_path / "nodist")
+    c = create_app(s).test_client()
+    assert c.get("/api/v1/settings").get_json()["dev_tools"] is True
+    assert c.post("/api/v1/dev/jobs", data={}, content_type="multipart/form-data").status_code == 400
+    r = c.post("/api/v1/dev/jobs", data={"video": (io.BytesIO(b"x"), "notes.txt")}, content_type="multipart/form-data")
+    assert r.status_code == 400 and "Unsupported" in r.get_json()["error"]
+    r = c.post("/api/v1/dev/jobs", data={"video": (io.BytesIO(b""), "clip.mp4")}, content_type="multipart/form-data")
+    assert r.status_code == 400 and "empty" in r.get_json()["error"]
+    assert c.get("/api/v1/dev/jobs").get_json() == []
+
+
+def test_dev_tools_can_be_disabled(tmp_path):
+    s = Settings(api_key=KEY, data_dir=tmp_path, dashboard_dir=tmp_path / "nodist", dev_tools=False)
+    c = create_app(s).test_client()
+    assert c.get("/api/v1/settings").get_json()["dev_tools"] is False
+    assert c.get("/api/v1/dev/jobs").status_code == 404

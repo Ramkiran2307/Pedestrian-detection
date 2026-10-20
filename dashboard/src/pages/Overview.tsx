@@ -1,19 +1,28 @@
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { AlertTriangle, ArrowRight, Camera, Clock3, IndianRupee, Recycle } from "lucide-react";
 import { api, compactInr, fmtDateTime, inr, offenderLabel, STATUS_LABEL, timeAgo, VEHICLE_LABEL, type Status } from "../api";
 import { BarList, HourlyChart, TrendChart } from "../components/charts";
+import DevUpload from "../components/DevUpload";
 import { Empty, Kpi, Plate, StatusBadge, useApp, usePolling } from "../components/ui";
 
 const PIPELINE: Status[] = ["pending_review", "verified", "notice_issued", "escalated", "paid", "rejected"];
 
 export default function Overview() {
-  const { setPendingCount } = useApp();
+  const { setPendingCount, settings } = useApp();
   const stats = usePolling(() => api.stats(), [], 5000);
   const recent = usePolling(() => api.incidents({ page_size: 6 }), [], 5000);
   const cams = usePolling(() => api.cameras(), [], 10000);
   const navigate = useNavigate();
   const s = stats.data;
+  const { reload: reloadStats } = stats;
+  const { reload: reloadRecent } = recent;
+  const { reload: reloadCams } = cams;
+  const refreshAll = useCallback(() => {
+    reloadStats();
+    reloadRecent();
+    reloadCams();
+  }, [reloadStats, reloadRecent, reloadCams]);
 
   useEffect(() => {
     if (s) setPendingCount(s.totals.pending_review);
@@ -152,6 +161,7 @@ export default function Overview() {
           </section>
         </div>
       </div>
+      {settings?.dev_tools && <DevUpload onFinished={refreshAll} />}
     </>
   );
 }

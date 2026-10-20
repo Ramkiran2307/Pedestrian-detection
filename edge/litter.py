@@ -38,6 +38,10 @@ class Candidate:
     visible_time: float = 0.0  # time spent visible and not under a person/vehicle
     confirmed: bool = False
     confirmed_at: float | None = None
+    area: float = 0.0              # changed pixels when last reported
+    growth_since: float | None = None
+    growth_last: float = 0.0
+    growth_visible: float = 0.0
 
     def progress(self, static_seconds: float) -> float:
         return 1.0 if self.confirmed else min(1.0, self.visible_time / static_seconds)
@@ -58,6 +62,11 @@ class LitterDetector:
         self.cfg = cfg
         self.zone = zone
         self.bg: np.ndarray | None = None
+        # Seconds each pixel has been seen with nobody in front of it. Pixels that were
+        # hidden when the background was learned (a bike parked in the first frame) are
+        # "unlearned": when they are uncovered they are learned, not reported as litter.
+        self.clean_time: np.ndarray | None = None
+        self.warmup_frames: list[np.ndarray] = []
         self.start_t: float | None = None
         self.prev_t: float | None = None
         self.scale = 1.0
@@ -82,8 +91,9 @@ class LitterDetector:
             mask[y1:y2, x1:x2] = 255
         return mask
 
-    def _reset_background(self, small: np.ndarray) -> None:
+    def _reset_background(self, small: np.ndarray, actor_mask: np.ndarray) -> None:
         self.bg = small.copy()
+        self.clean_time = np.where(actor_mask > 0, 0.0, self.cfg.learn_seconds).astype(np.float32)
         self.candidates.clear()
         self.resets += 1
 
@@ -107,14 +117,30 @@ class LitterDetector:
         if self.bg is None:
             self.start_t = t
             self.bg = small.copy()
+            self.clean_time = np.where(actor_mask > 0, 0.0, dt).astype(np.float32)
             return []
 
+        free_of_actors = actor_mask == 0
         if self.warming_up:
-            # Learn the empty scene quickly, except where people/vehicles stand.
-            cv2.accumulateWeighted(small, self.bg, 0.2, mask=cv2.bitwise_not(actor_mask))
+            # Learn the empty scene: sample frames and take the per-pixel median at the end,
+            # so cars, bikes and shadows that only pass through (even if YOLO missed them)
+            # do not end up in the background.
+            self.clean_time[free_of_actors] += dt
+            if len(self.warmup_frames) < 24 and (not self.warmup_frames or int(t * 8) != int((t - dt) * 8)):
+                self.warmup_frames.append(small.astype(np.uint8))
             return []
+        if self.warmup_frames:
+            self.bg = np.median(np.stack(self.warmup_frames), axis=0).astype(np.float32)
+            self.warmup_frames = []
+
+        # Pixels never seen empty yet: take the current view as background right away.
+        unlearned = self.clean_time < self.cfg.learn_seconds
+        fresh = unlearned & free_of_actors
+        self.bg[fresh] = small[fresh]
+        self.clean_time[free_of_actors] += dt
 
         diff = cv2.absdiff(small, self.bg).max(axis=2)
+        diff[unlearned] = 0
         fg = np.where(diff > self.cfg.diff_threshold, 255, 0).astype(np.uint8)
         fg = cv2.bitwise_and(fg, zone_mask)
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
@@ -124,7 +150,7 @@ class LitterDetector:
         free = cv2.bitwise_and(fg, cv2.bitwise_not(actor_mask))
         if cv2.countNonZero(free) / zone_area > self.cfg.global_change_ratio:
             # Lights switched on, cloud passed, camera nudged... start over.
-            self._reset_background(small)
+            self._reset_background(small, actor_mask)
             return []
         self.last_fg = free
 
@@ -141,31 +167,72 @@ class LitterDetector:
         return events
 
     def _blobs(self, fg: np.ndarray, zone_area: int) -> list[tuple[Box, float]]:
-        n, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+        """Connected regions of changed pixels. Pieces closer than group_px (a scattered
+        pile of bags, bottles and paper) are grouped into one blob; its area is the
+        number of really changed pixels, not the grouped outline."""
+        g = max(1, self.cfg.group_px)
+        grouped = cv2.dilate(fg, np.ones((g, g), np.uint8)) if g > 1 else fg
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(grouped, connectivity=8)
         out = []
-        max_area = self.cfg.max_area_ratio * fg.shape[0] * fg.shape[1]
+        h, w = fg.shape
+        max_area = self.cfg.max_area_ratio * h * w
+        pad = g // 2
         for i in range(1, n):
-            x, y, bw, bh, a = stats[i]
+            x, y, bw, bh, _ = stats[i]
+            region = (labels[y:y + bh, x:x + bw] == i) & (fg[y:y + bh, x:x + bw] > 0)
+            a = int(np.count_nonzero(region))
             if a < self.cfg.min_area_px or a > max_area:
                 continue
-            out.append(((float(x), float(y), float(x + bw), float(y + bh)), float(a)))
+            x1, y1 = min(x + pad, x + bw - 1), min(y + pad, y + bh - 1)
+            x2, y2 = max(x1 + 1, x + bw - pad), max(y1 + 1, y + bh - pad)
+            out.append(((float(x1), float(y1), float(min(w, x2)), float(min(h, y2))), float(a)))
         return out
 
-    def _match(self, box: Box, taken: set[int]) -> Candidate | None:
-        """Same object as an existing candidate? Overlap, or a partial view of it."""
-        best, best_score = None, 0.0
-        for c in self.candidates.values():
-            if c.id in taken:
+    def _match_score(self, box: Box, c: Candidate) -> float:
+        """How likely a blob is the same object as a candidate (0 = unrelated)."""
+        score = iou(box, c.bbox)
+        # Half hidden behind a passer-by: the visible part is smaller but sits on top of it.
+        if score < 0.25 and (_inside(_center(box), expand(c.bbox, 0.5)) or _inside(_center(c.bbox), expand(box, 0.5))):
+            score = 0.25
+        if c.confirmed and score > 0:
+            score += 0.1
+        return score
+
+    def _assign(self, blobs: list[tuple[Box, float]]) -> dict[int, Candidate]:
+        """Best-first one-to-one matching of blobs to candidates (blob index -> candidate)."""
+        pairs = [(self._match_score(box, c), i, c) for i, (box, _) in enumerate(blobs)
+                 for c in self.candidates.values()]
+        pairs.sort(key=lambda p: p[0], reverse=True)
+        out: dict[int, Candidate] = {}
+        used: set[int] = set()
+        for score, i, c in pairs:
+            if score < 0.25:
+                break
+            if i in out or c.id in used:
                 continue
-            score = iou(box, c.bbox)
-            # Half hidden behind a passer-by: the visible part is smaller but sits on top of it.
-            if _inside(_center(box), expand(c.bbox, 0.5)) or _inside(_center(c.bbox), expand(box, 0.5)):
-                score = max(score, 0.3)
-            if c.confirmed and score > 0:
-                score += 0.2
-            if score > best_score:
-                best, best_score = c, score
-        return best if best_score >= 0.25 else None
+            out[i] = c
+            used.add(c.id)
+        return out
+
+    def _check_growth(self, c: Candidate, box: Box, a: float, t: float, dt: float) -> LitterEvent | None:
+        bigger = a > c.area * self.cfg.growth_ratio and a - c.area > 3 * self.cfg.min_area_px
+        if not bigger:
+            # one smaller-looking frame (someone in front of it) is not enough to give up
+            if c.growth_since is not None and t - c.growth_last > self.cfg.miss_tolerance_seconds:
+                c.growth_since, c.growth_visible = None, 0.0
+            return None
+        c.growth_last = t
+        if c.growth_since is None:
+            c.growth_since = t
+        if not self._covered_by_actor(box):
+            c.growth_visible += dt
+        if c.growth_visible < self.cfg.static_seconds:
+            return None
+        appeared = c.growth_since
+        c.area, c.bbox, c.confirmed_at = a, box, t
+        c.growth_since, c.growth_visible = None, 0.0
+        inv = 1.0 / self.scale
+        return LitterEvent(c.id, appeared, t, scale(box, inv), a * inv * inv, {"added_to_pile": True})
 
     def _covered_by_actor(self, box: Box) -> bool:
         a = max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
@@ -174,8 +241,9 @@ class LitterDetector:
     def _track(self, blobs: list[tuple[Box, float]], t: float, dt: float, actor_mask: np.ndarray) -> list[LitterEvent]:
         events: list[LitterEvent] = []
         matched: set[int] = set()
-        for box, a in blobs:
-            best = self._match(box, matched)
+        assignment = self._assign(blobs)
+        for i, (box, a) in enumerate(blobs):
+            best = assignment.get(i)
             if best is None:
                 c = Candidate(next(_ids), box, _center(box), t, t)
                 self.candidates[c.id] = c
@@ -184,7 +252,12 @@ class LitterDetector:
             matched.add(best.id)
             best.last_seen = t
             if best.confirmed:
-                continue  # already reported; a partial view must not re-trigger or move it
+                # Already reported: a partial view must not re-trigger it or move it. But if
+                # the pile clearly grows and stays bigger, someone added more litter to it.
+                grown = self._check_growth(best, box, a, t, dt)
+                if grown:
+                    events.append(grown)
+                continue
             best.bbox = box
             drift = math.dist(_center(box), best.origin)
             if drift > self.cfg.max_drift_px:
@@ -198,6 +271,7 @@ class LitterDetector:
             if not best.confirmed and best.visible_time >= self.cfg.static_seconds:
                 best.confirmed = True
                 best.confirmed_at = t
+                best.area = a
                 inv = 1.0 / self.scale
                 events.append(LitterEvent(best.id, best.first_seen, t, scale(box, inv), a * inv * inv))
 

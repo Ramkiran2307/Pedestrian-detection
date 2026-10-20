@@ -14,6 +14,10 @@ Dashboard endpoints:
   GET  /api/v1/cameras                      edge devices and whether they are online
   GET  /api/v1/settings                     municipality name, fine schedule
   GET  /media/<uid>/<file>                  evidence files
+Development tools (LW_DEV_TOOLS=1, the default):
+  POST /api/v1/dev/jobs                     upload a video -> processed by the edge pipeline
+  GET  /api/v1/dev/jobs                     job list with progress
+  POST /api/v1/dev/jobs/<id>/cancel
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, abort, g, jsonify, request, send_from_directory
 
 from .db import connect, init_db, now_iso, row_to_dict
+from .devjobs import JobRunner
 from .settings import Settings
 from .workflow import STATUSES, WorkflowError, apply_action, fine_for, pretty_plate
 
@@ -59,7 +64,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     tz = ZoneInfo(settings.timezone)
 
     app = Flask(__name__, static_folder=None)
-    app.config["MAX_CONTENT_LENGTH"] = settings.max_upload_mb * 1024 * 1024
+    upload_mb = max(settings.max_upload_mb, settings.dev_max_upload_mb if settings.dev_tools else 0)
+    app.config["MAX_CONTENT_LENGTH"] = upload_mb * 1024 * 1024
     app.config["SETTINGS"] = settings
 
     # ------------------------------------------------------------------ helpers
@@ -212,7 +218,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     def get_settings():
         return jsonify(municipality=settings.municipality, department=settings.department,
                        timezone=settings.timezone, currency="INR", fines=settings.fines,
-                       notice_due_days=settings.notice_due_days, statuses=STATUSES)
+                       notice_due_days=settings.notice_due_days, statuses=STATUSES,
+                       dev_tools=settings.dev_tools)
 
     @app.get("/api/v1/incidents")
     def list_incidents():
@@ -354,6 +361,39 @@ def create_app(settings: Settings | None = None) -> Flask:
             out.append(d)
         return jsonify(out)
 
+    # ------------------------------------------------- development: video upload
+    runner: list[JobRunner] = []   # created on first use (starts a worker thread)
+
+    def jobs() -> JobRunner:
+        if not settings.dev_tools:
+            abort(404, description="Developer tools are disabled (LW_DEV_TOOLS=0)")
+        if not runner:
+            runner.append(JobRunner(settings))
+        return runner[0]
+
+    @app.post("/api/v1/dev/jobs")
+    def dev_submit():
+        r = jobs()
+        video = request.files.get("video")
+        if video is None or not video.filename:
+            abort(400, description="Choose a video file to upload")
+        try:
+            job = r.submit(video, full_frame=request.form.get("full_frame", "1") == "1")
+        except ValueError as e:
+            abort(400, description=str(e))
+        return jsonify(job.to_dict()), 202
+
+    @app.get("/api/v1/dev/jobs")
+    def dev_list():
+        return jsonify(jobs().list())
+
+    @app.post("/api/v1/dev/jobs/<job_id>/cancel")
+    def dev_cancel(job_id: str):
+        job = jobs().cancel(job_id)
+        if job is None:
+            abort(404, description="Job not found")
+        return jsonify(job.to_dict())
+
     @app.get("/media/<path:path>")
     def media(path: str):
         return send_from_directory(settings.media_dir, path, conditional=True)
@@ -379,8 +419,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     app = create_app()
     host = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", 5000))
     s: Settings = app.config["SETTINGS"]
+    port = s.port
     if s.api_key == "demo-edge-key":
         log.warning("Using the demo API key. Set LW_API_KEY before exposing this server on a network.")
     log.info("database: %s", s.db_path)
