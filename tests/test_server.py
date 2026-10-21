@@ -140,3 +140,22 @@ def test_dev_tools_can_be_disabled(tmp_path):
     c = create_app(s).test_client()
     assert c.get("/api/v1/settings").get_json()["dev_tools"] is False
     assert c.get("/api/v1/dev/jobs").status_code == 404
+
+
+def test_works_without_timezone_database(tmp_path, monkeypatch):
+    # Windows has no IANA time-zone data unless the tzdata package is installed
+    import server.app as app_module
+    from zoneinfo import ZoneInfoNotFoundError
+
+    def missing(name):
+        raise ZoneInfoNotFoundError(f"No time zone found with key {name}")
+
+    monkeypatch.setattr(app_module, "ZoneInfo", missing)
+    s = Settings(api_key=KEY, data_dir=tmp_path, dashboard_dir=tmp_path / "nodist")
+    c = create_app(s).test_client()
+    post(c, meta("TZ-1"))
+    stats = c.get("/api/v1/stats").get_json()
+    assert stats["totals"]["all"] == 1
+    tz = app_module.load_timezone("Asia/Kolkata")
+    from datetime import datetime, timezone
+    assert datetime(2026, 1, 1, tzinfo=timezone.utc).astimezone(tz).hour == 5

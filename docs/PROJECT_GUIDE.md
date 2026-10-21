@@ -591,6 +591,7 @@ The synthetic video proves the logic, not real-world accuracy. Record a few minu
 |---|---|
 | `cv2.imshow ... not implemented` | Both `opencv-python` and `opencv-python-headless` are installed (EasyOCR pulls the headless one). Use the browser preview, or reinstall `opencv-python` (section 10). |
 | `ModuleNotFoundError: lap` | `pip install lap` (needed by ByteTrack). |
+| `ZoneInfoNotFoundError: 'No time zone found with key Asia/Kolkata'` (Windows) | Windows has no time-zone database: `pip install tzdata` (now in `requirements.txt`). The server also falls back to a fixed IST offset (+05:30) if it is missing. |
 | yolo26s fails to load | Needs `ultralytics >= 8.3.222`. |
 | Dashboard says "Cannot reach the server" | Start `python -m server.app`; in dev, Vite proxies to port 5000. |
 | Uploads fail with 401 | `server.api_key` in `edge/config.yaml` ≠ `LW_API_KEY`. |

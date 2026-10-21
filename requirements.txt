@@ -9,6 +9,7 @@ requests
 
 # Server
 flask>=3.0
+tzdata                    # time-zone database; Windows doesn't ship one
 
 # Tests
 pytest

@@ -30,7 +30,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, g, jsonify, request, send_from_directory
 
@@ -57,11 +57,28 @@ def parse_time(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# Fixed offsets for common zones, used when the OS has no time-zone database
+# (Windows without the `tzdata` package). India has no daylight saving, so this is exact.
+FALLBACK_ZONES = {"Asia/Kolkata": timedelta(hours=5, minutes=30), "Asia/Calcutta": timedelta(hours=5, minutes=30),
+                  "UTC": timedelta(0)}
+
+
+def load_timezone(name: str):
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        offset = FALLBACK_ZONES.get(name)
+        if offset is None:
+            log.warning("time zone %r not found (pip install tzdata); using UTC", name)
+            offset = timedelta(0)
+        return timezone(offset, name)
+
+
 def create_app(settings: Settings | None = None) -> Flask:
     settings = settings or Settings()
     settings.media_dir.mkdir(parents=True, exist_ok=True)
     init_db(settings.db_path)
-    tz = ZoneInfo(settings.timezone)
+    tz = load_timezone(settings.timezone)
 
     app = Flask(__name__, static_folder=None)
     upload_mb = max(settings.max_upload_mb, settings.dev_max_upload_mb if settings.dev_tools else 0)
