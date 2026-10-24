@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hmac
 import json
+import time
+from fnmatch import fnmatch
 import logging
 import mimetypes
 import os
@@ -34,6 +36,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, abort, g, jsonify, request, send_from_directory
 
+from . import auth
 from .db import connect, init_db, now_iso, row_to_dict
 from .devjobs import JobRunner
 from .settings import Settings
@@ -80,6 +83,10 @@ def create_app(settings: Settings | None = None) -> Flask:
     init_db(settings.db_path)
     tz = load_timezone(settings.timezone)
 
+    if settings.seed_sample:
+        from .seed import seed_if_empty
+        seed_if_empty(settings, settings.seed_sample)
+
     app = Flask(__name__, static_folder=None)
     upload_mb = max(settings.max_upload_mb, settings.dev_max_upload_mb if settings.dev_tools else 0)
     app.config["MAX_CONTENT_LENGTH"] = upload_mb * 1024 * 1024
@@ -96,6 +103,64 @@ def create_app(settings: Settings | None = None) -> Flask:
         conn = g.pop("db", None)
         if conn is not None:
             conn.close()
+
+    # ---------------------------------------------- browser access (CORS) + login
+    def origin_allowed(origin: str) -> bool:
+        return any(o == "*" or origin == o or fnmatch(origin, o) for o in settings.cors_origins)
+
+    @app.after_request
+    def _cors(resp):
+        origin = request.headers.get("Origin", "")
+        if origin and origin_allowed(origin) and request.path.startswith(("/api/", "/media/")):
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            resp.headers["Access-Control-Max-Age"] = "600"
+            resp.headers.add("Vary", "Origin")
+        return resp
+
+    PUBLIC_PATHS = {"/api/v1/health", "/api/v1/settings", "/api/v1/auth"}
+
+    def is_edge_call() -> bool:
+        # the camera device authenticates with X-API-Key instead
+        return request.method == "POST" and (request.path == "/api/v1/incidents"
+                                             or (request.path.startswith("/api/v1/cameras/")
+                                                 and request.path.endswith("/heartbeat")))
+
+    @app.before_request
+    def _login_gate():
+        g.token = None
+        if not settings.dashboard_password or request.method == "OPTIONS":
+            return None
+        path = request.path
+        if path in PUBLIC_PATHS or is_edge_call():
+            return None
+        if path.startswith("/api/"):
+            header = request.headers.get("Authorization", "")
+            token = header[7:] if header.startswith("Bearer ") else None
+        elif path.startswith("/media/"):
+            token = request.args.get("t")
+        else:
+            return None   # the dashboard's own files
+        if not auth.check_token(token, settings.dashboard_password, settings.api_key):
+            return jsonify(error="Sign in with the dashboard access code", auth_required=True), 401
+        g.token = token
+        return None
+
+    @app.post("/api/v1/auth")
+    def login():
+        if not settings.dashboard_password:
+            return jsonify(token=None, auth_required=False)
+        body = request.get_json(silent=True) or {}
+        if not auth.password_ok(str(body.get("password", "")), settings.dashboard_password):
+            time.sleep(0.5)   # slow down guessing
+            return jsonify(error="Wrong access code"), 401
+        token, exp = auth.issue_token(settings.dashboard_password, settings.api_key)
+        return jsonify(token=token, expires_at=exp)
+
+    def media_url(path: str) -> str:
+        url = f"/media/{path}"
+        return f"{url}?t={g.token}" if getattr(g, "token", None) else url
 
     def require_key():
         given = request.headers.get("X-API-Key", "")
@@ -119,7 +184,7 @@ def create_app(settings: Settings | None = None) -> Flask:
         out: dict[int, dict[str, str]] = defaultdict(dict)
         for row in db().execute(f"SELECT incident_id, kind, path FROM evidence WHERE incident_id IN ({marks})",
                                 incident_ids):
-            out[row["incident_id"]][row["kind"]] = f"/media/{row['path']}"
+            out[row["incident_id"]][row["kind"]] = media_url(row["path"])
         return out
 
     def serialize(row, evidence: dict[str, str]) -> dict:
@@ -239,7 +304,7 @@ def create_app(settings: Settings | None = None) -> Flask:
         return jsonify(municipality=settings.municipality, department=settings.department,
                        timezone=settings.timezone, currency="INR", fines=settings.fines,
                        notice_due_days=settings.notice_due_days, statuses=STATUSES,
-                       dev_tools=settings.dev_tools)
+                       dev_tools=settings.dev_tools, auth_required=bool(settings.dashboard_password))
 
     @app.get("/api/v1/incidents")
     def list_incidents():

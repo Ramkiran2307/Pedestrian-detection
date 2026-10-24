@@ -1,0 +1,4 @@
+# Server only (for hosting on Render): no AI libraries needed - detection runs on the laptop / Pi.
+flask>=3.0,<4
+tzdata
+gunicorn>=23.0

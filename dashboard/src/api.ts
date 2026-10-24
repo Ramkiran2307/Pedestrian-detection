@@ -108,6 +108,7 @@ export interface Settings {
   fines: Record<string, number>;
   notice_due_days: number;
   dev_tools?: boolean;
+  auth_required?: boolean;
 }
 
 export interface DevJob {
@@ -137,17 +138,76 @@ export class ApiError extends Error {
   }
 }
 
+// Where the Flask API lives. Empty = same site (served by Flask itself, or the Vite dev
+// proxy). On Vercel, set VITE_API_BASE to the Render address, e.g. https://swachh-netra-api.onrender.com
+export const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+
+// ---------------------------------------------------------------- access code
+const TOKEN_KEY = "lw_token";
+let memoryToken = "";
+export const AUTH_REQUIRED_EVENT = "lw-auth-required";
+
+export function getToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || memoryToken;
+  } catch {
+    return memoryToken;
+  }
+}
+
+export function setToken(token: string): void {
+  memoryToken = token;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* private mode: keep it in memory */
+  }
+}
+
+export function signOut(): void {
+  setToken("");
+  window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+}
+
+function authHeaders(): Record<string, string> {
+  const t = getToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+// Evidence links come back as "/media/..."; when the API is on another site they must
+// point there too.
+function withApiBase<T>(value: T): T {
+  if (!API_BASE) return value;
+  if (typeof value === "string") return (value.startsWith("/media/") ? API_BASE + value : value) as T;
+  if (Array.isArray(value)) return value.map(withApiBase) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, withApiBase(v)])) as T;
+  }
+  return value;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(API_BASE + path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers: {
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...authHeaders(),
+      ...(init?.headers || {}),
+    },
   });
   const body = await res.json().catch(() => ({}));
+  if (res.status === 401 && body.auth_required) {
+    setToken("");
+    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+  }
   if (!res.ok) throw new ApiError(res.status, body.error || `Request failed (${res.status})`);
-  return body as T;
+  return withApiBase(body as T);
 }
 
 export const api = {
+  login: (password: string) =>
+    request<{ token: string | null; expires_at?: number }>("/api/v1/auth", { method: "POST", body: JSON.stringify({ password }) }),
   stats: () => request<Stats>("/api/v1/stats"),
   settings: () => request<Settings>("/api/v1/settings"),
   cameras: () => request<Camera[]>("/api/v1/cameras"),
@@ -170,7 +230,8 @@ export const api = {
       form.append("video", file);
       form.append("full_frame", fullFrame ? "1" : "0");
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/v1/dev/jobs");
+      xhr.open("POST", API_BASE + "/api/v1/dev/jobs");
+      Object.entries(authHeaders()).forEach(([k, v]) => xhr.setRequestHeader(k, v));
       xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(Math.round((e.loaded / e.total) * 100));
       xhr.onload = () => {
         let body: { error?: string } = {};

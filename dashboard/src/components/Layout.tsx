@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { ClipboardList, LayoutDashboard, Menu, Moon, MonitorPlay, Sun, Workflow } from "lucide-react";
+import { ClipboardList, LayoutDashboard, LogOut, Menu, Moon, MonitorPlay, Sun, Workflow } from "lucide-react";
+import { signOut } from "../api";
 import { useApp } from "./ui";
 
 type Theme = "light" | "dark";
@@ -90,6 +91,11 @@ export default function Layout() {
           <button className="icon-btn" aria-label="Toggle dark mode" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
           </button>
+          {settings?.auth_required && (
+            <button className="icon-btn" aria-label="Sign out" title="Sign out" onClick={signOut}>
+              <LogOut size={17} />
+            </button>
+          )}
         </header>
         <main className="content">
           <Outlet />
