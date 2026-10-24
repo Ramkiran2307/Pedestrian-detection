@@ -1,6 +1,7 @@
 # Edge (camera side: laptop / Raspberry Pi)
 ultralytics>=8.3.222      # YOLO26 support is required for models/yolo26s.pt
-easyocr>=1.7
+easyocr>=1.7               # fallback plate reader
+fast-plate-ocr[onnx]>=1.1 # licence-plate OCR models (downloaded on first use, ~5 MB each)
 lap>=0.5.12               # ByteTrack tracker dependency
 opencv-python>=4.9
 numpy
@@ -9,6 +10,7 @@ requests
 
 # Server
 flask>=3.0
+tzdata                    # time-zone database; Windows doesn't ship one
 
 # Tests
 pytest

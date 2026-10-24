@@ -26,6 +26,7 @@ export default function Incidents() {
     to: params.get("to") || "",
     q: params.get("q") || "",
     camera: params.get("camera") || "",
+    plate: params.get("plate") || "",
   };
   const key = JSON.stringify({ ...filters, page });
   const list = usePolling(() => api.incidents({ ...filters, page, page_size: 15 }), [key], 6000);
@@ -86,6 +87,10 @@ export default function Incidents() {
             <option value="assigned">Cleanup assigned</option>
             <option value="cleaned">Cleaned</option>
           </select>
+          <select className="select" value={filters.plate} onChange={(e) => update({ plate: e.target.value })} aria-label="Plate">
+            <option value="">Any plate</option>
+            <option value="unverified">Plate not verified</option>
+          </select>
           <input type="date" className="input" style={{ width: "auto" }} value={filters.from} aria-label="From date"
                  onChange={(e) => update({ from: e.target.value })} />
           <input type="date" className="input" style={{ width: "auto" }} value={filters.to} aria-label="To date"
@@ -134,7 +139,12 @@ export default function Incidents() {
                         {i.attribution_score ? `Match ${Math.round(i.attribution_score * 100)}%` : "No suspect nearby"}
                       </div>
                     </td>
-                    <td>{i.offender_type === "vehicle" ? <Plate text={i.plate_display} /> : <span className="muted">—</span>}</td>
+                    <td>{i.offender_type === "vehicle" ? (
+                      <div>
+                        <Plate text={i.plate_display} />
+                        <div className="cell-sub">{i.plate_verified ? "✓ Verified" : i.plate_number ? "Not verified" : "Not read"}</div>
+                      </div>
+                    ) : <span className="muted">—</span>}</td>
                     <td>
                       <div>{i.location || "—"}</div>
                       <div className="cell-sub">{i.ward || ""} {i.camera_id ? `· ${i.camera_id}` : ""}</div>

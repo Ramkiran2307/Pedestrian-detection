@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import shutil
 import subprocess
@@ -140,8 +141,11 @@ class JobRunner:
     def _run(self, job: Job) -> None:
         job.status, job.started = "running", time.time()
         log.info("dev job %s running", job.id)
+        # UTF-8 output: on Windows a pipe otherwise uses the legacy code page and printing
+        # a non-ASCII character (e.g. in a file name) would crash the pipeline.
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         job.proc = subprocess.Popen(self._command(job), cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, encoding="utf-8", errors="replace", bufsize=1)
+                                    text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
         with open(job.path.parent / "run.log", "w", encoding="utf-8") as logfile:
             for line in job.proc.stdout:
                 logfile.write(line)

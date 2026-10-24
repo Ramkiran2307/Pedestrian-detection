@@ -50,7 +50,7 @@ export default function Overview() {
              foot={`${s.totals.all} recorded in total · ${s.by_type.person} pedestrian, ${s.by_type.vehicle} vehicle`} />
         <Link to="/incidents?status=pending_review" className="kpi-link">
           <Kpi label="Awaiting review" icon={<Clock3 size={15} />} value={s.totals.pending_review}
-               foot="Open the register to verify evidence" />
+               foot={s.totals.plates_unverified ? `${s.totals.plates_unverified} number plate${s.totals.plates_unverified === 1 ? "" : "s"} to verify` : "Open the register to verify evidence"} />
         </Link>
         <Link to="/incidents?overdue=1" className="kpi-link">
           <Kpi label="Overdue notices" icon={<AlertTriangle size={15} />} value={s.totals.overdue}

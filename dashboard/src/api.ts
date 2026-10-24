@@ -26,6 +26,12 @@ export interface Incident {
   plate_valid: boolean | null;
   plate_raw: string[] | null;
   plate_corrected: boolean;
+  plate_level: "high" | "medium" | "low" | null;
+  plate_candidates: { text: string; pretty?: string | null; confidence: number }[] | null;
+  plate_engine: string | null;
+  plate_verified: boolean;
+  plate_verified_by: string | null;
+  plate_verified_at: string | null;
   status: Status;
   cleanup_status: Cleanup;
   cleanup_assignee: string | null;
@@ -37,7 +43,7 @@ export interface Incident {
   payment_ref: string | null;
   rejection_reason: string | null;
   is_sample: boolean;
-  evidence: Partial<Record<"scene" | "litter" | "person" | "vehicle" | "plate" | "clip", string>>;
+  evidence: Partial<Record<"scene" | "litter" | "person" | "vehicle" | "plate" | "plate_enhanced" | "clip", string>>;
   thumbnail: string | null;
   overdue: boolean;
   suggested_fine: number;
@@ -82,7 +88,7 @@ export interface Page<T> {
 export interface Stats {
   totals: {
     all: number; today: number; pending_review: number; overdue: number;
-    cleanup_pending: number; cameras: number; cameras_online: number;
+    cleanup_pending: number; cameras: number; cameras_online: number; plates_unverified: number;
   };
   by_status: Record<Status, number>;
   by_type: Record<OffenderType, number>;

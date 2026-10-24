@@ -275,24 +275,51 @@ The highest score is the **offender**. Then `linked_actor` looks for a person an
 
 If nobody qualifies, the incident is still reported as **unattributed** (`report_unattributed: true`). The city still needs to clean the litter.
 
-### 6.6 Number-plate reading (`plates.py`)
+### 6.6 Number-plate reading (`plates.py`, `plate_ocr.py`)
 
-This runs only in the background worker, and only for offending vehicles:
+This runs only in the background worker, and only for offending vehicles. Plates seen by CCTV are usually small and blurry, so reading them is done in two stages: **enhance** the plate using many frames, then **read** it with OCR models made for licence plates.
 
-1. **Detect** the plate with `license_plate.pt` in each of up to 5 cached vehicle crops; keep the best box, with 6 % / 12 % padding.
-2. **Prepare two variants:** upscaled to about 96 px tall (bicubic), and a CLAHE contrast-enhanced grayscale version.
-3. **OCR** with EasyOCR, `allowlist = A-Z 0-9`, dropping fragments below confidence 0.15.
-4. **Join fragments** top-to-bottom, then left-to-right (lines split when the vertical gap exceeds 0.6 × the median fragment height). This handles two-line bike plates.
-5. **Normalise to Indian formats:**
-   * Standard: `SS DD L{0-3} NNNN` (e.g. `KA 01 AB 1234`, `DL 3C AB 1234`, `MH 12 A 1234`)
-   * BH series: `YY BH NNNN L{1-2}` (e.g. `22 BH 1234 AA`)
+**Stage 1: find the plate in many frames.** The cache keeps the best 12 crops of each vehicle (`cache.vehicle_crops`). `license_plate.pt` finds the plate in each one, and the 12 sharpest plate crops (`ocr.max_frames`) are used. Each is trimmed to the bright plate rectangle (`tight_crop`), because the OCR models are trained on tightly cropped plates.
 
-   Every layout that fits the string's length is tried. Characters are fixed **by slot type**: a letter slot turns `0→O, 1→I, 8→B, 5→S…` and a digit slot turns `O→0, I→1, B→8, S→5…`. The state code must be a real one (`KA`, `MH`, `DL`, `TN`, … 39 codes). A leading `IND` (from high-security plates) is stripped. The layout needing the fewest fixes wins (at most 3).
-6. **Vote** across all crops and variants: weight = OCR confidence × detection confidence (× 0.35 if the format is invalid). The reported confidence = mean OCR confidence × agreement.
+**Stage 2: enhance (multi-frame fusion).** The crops are upscaled 4× and **aligned to the sharpest one** with ECC image registration (an affine warp per frame; frames that don't align well, correlation < 0.6, are left out). Then they are **averaged**: random noise, JPEG blocks and blur that differ from frame to frame cancel out, while the characters, which are the same in every frame, stay. The result is sharpened (unsharp mask) and contrast-normalised (CLAHE). Two fused images are made, one from all 12 frames and one from the sharpest 6. The fused plate is saved as `plate_enhanced.jpg` and shown to the officer next to the camera crop.
 
-If the format is still invalid, the plate is sent as **not read**: the number stays empty, the raw OCR guesses are kept for reference and `plate.jpg` is attached, and the dashboard shows "NOT READ" so the officer can type the number in from the photo. Before this change, garbage such as `TL2` was stored as if it were a plate. A notice for a vehicle cannot be issued until a valid plate is entered.
+**Stage 3: read with licence-plate OCR models.** Two [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) models (`cct-s-v2-global-model`, `cct-xs-v2-global-model`; Compact Convolutional Transformers trained on plates from many countries, ~5 MB each, ONNX, run on CPU and on a Raspberry Pi) read every crop and both fused images. For each of 10 character positions they output a probability for every character (0-9, A-Z, padding); the two models' outputs are averaged.
 
-How big a plate must be: OCR needs the characters to be roughly 15–20 px tall. In the 848×478 test footage the car's plate is about 55×24 px, with characters about 10 px tall. No OCR can read that reliably, so the officer correction path is what handles it. Use a higher-resolution camera, or mount it closer to the road, to get plates read automatically.
+**Stage 4: decode as an Indian plate.** Instead of taking the most likely character in each position independently, the decoder picks the most likely string that **is a valid Indian plate**:
+* Standard: `SS DD L{0-3} NNNN` (e.g. `KA 01 AB 1234`, `DL 3C AB 1234`, `MH 12 A 1234`), with a real state code (39 codes).
+* BH series: `YY BH NNNN L{1-2}` (e.g. `22 BH 1234 AA`).
+
+A letter can't win in a digit position (and vice versa), so 8/B, 0/O, 1/I, 5/S confusions are resolved by position. Each layout is weighted by how common it is on Indian roads (`FORMAT_PRIOR`), so a half-read long plate isn't decoded as a rare short format.
+
+**Stage 5: vote.** Every crop and both fused images "vote" for their decoded plate, weighted by its probability; the fused images count as 1/2 and 1/3 of the frames. The winner's **confidence is its share of the vote**:
+* **High** (≥ `high_confidence`, 0.65).
+* **Medium** (≥ `low_confidence`, 0.3).
+* **Low**: below that.
+
+The top 3 readings are sent as candidates.
+
+Per-image voting was chosen by measurement: it beat averaging the characters across frames, because a frame where the model skipped one character shifts all later positions.
+
+**The reading is always filled in, but never trusted blindly.** The server stores it as **not verified**. On the dashboard the officer sees the camera crop, the enhanced crop, the reading with its confidence and the alternatives. They must press **Plate verified**, pick an alternative, or type the plate in, and the server refuses to issue a notice for a vehicle before that (section 8).
+
+If `fast-plate-ocr` is not installed, the reader falls back to the original EasyOCR method (`ocr.engine: easyocr`): two variants per crop, fragments joined in reading order (for two-line bike plates), OCR confusions fixed by slot type, and a vote across crops.
+
+**Accuracy** (`python tools/eval_plate_ocr.py --easyocr`): synthetic Indian plates, one or two lines, degraded like CCTV (perspective jitter between frames, blur, motion blur, noise, JPEG at quality 35–70), 10 frames per plate:
+
+| Plate height | Old: EasyOCR | New: one frame | **New: enhanced + 10 frames** | "High confidence" readings that are correct |
+|---|---|---|---|---|
+| 18 px | 16 % | 0–2 % | **18–20 %** | 50–100 % (few) |
+| 24 px | 52 % | 20–48 % | **74–84 %** | 95–97 % |
+| 28 px | – | 42 % | **72 %** | 92 % |
+| 32 px | 56 % | 72–78 % | **92–100 %** | 98–100 % |
+
+Ranges are over two runs (25 and 50 plates per size).
+
+What this means in practice:
+* From about **24 px plate height** (characters ~14 px), most plates are read automatically, and "high confidence" readings are nearly always right.
+* Below ~18 px no reader is reliable. The enhanced image and the suggestions still help the officer.
+* In the 848×478 test footage the car's plate is about 23 px tall including its border, with characters ~10 px, at the very bottom of that range. The system reads it as `AP 01 BD 7172` (low confidence), with alternatives. The enhanced image is clearly more legible than the raw crop, so the officer can confirm the real number from it.
+* For automatic reading in real deployments, mount the camera so plates are at least ~25 px tall: a 1080p camera, or closer to the road.
 
 ### 6.7 Evidence (`evidence.py`)
 
@@ -348,9 +375,9 @@ HOST=0.0.0.0 LW_API_KEY=<secret> python -m server.app   # reachable by the Pi
 |---|---|---|---|
 | POST | `/api/v1/incidents` | edge (API key) | Upload an incident + evidence (idempotent by `uid`) |
 | POST | `/api/v1/cameras/<id>/heartbeat` | edge (API key) | Camera status |
-| GET | `/api/v1/incidents` | dashboard | List; filters `status, type, cleanup, camera, q, from, to, overdue, page, page_size` |
+| GET | `/api/v1/incidents` | dashboard | List; filters `status, type, cleanup, camera, plate=unverified, q, from, to, overdue, page, page_size` |
 | GET | `/api/v1/incidents/<id>` | dashboard | Detail + evidence URLs + audit trail + earlier cases for the same plate |
-| POST | `/api/v1/incidents/<id>/actions` | dashboard | `verify, reject, issue_notice, mark_paid, escalate, reopen, assign_cleanup, mark_cleaned, correct_plate, add_note` |
+| POST | `/api/v1/incidents/<id>/actions` | dashboard | `verify, reject, issue_notice, mark_paid, escalate, reopen, assign_cleanup, mark_cleaned, verify_plate, correct_plate, add_note` |
 | GET | `/api/v1/stats` | dashboard | KPIs, per-day / per-hour counts, pipeline, repeat offenders |
 | GET | `/api/v1/cameras` | dashboard | Cameras + online flag |
 | GET | `/api/v1/settings` | dashboard | Municipality, fine schedule, due days |
@@ -370,6 +397,8 @@ incidents  (id PK, uid UNIQUE, camera_id, zone, ward, location,
             offender_type [person|vehicle|unknown], offender_track, attribution_score,
             vehicle_class, vehicle_category [two_wheeler|car|heavy], linked_track,
             plate_number, plate_display, plate_confidence, plate_valid, plate_raw JSON, plate_corrected,
+            plate_level [high|medium|low], plate_candidates JSON, plate_engine,
+            plate_verified, plate_verified_by, plate_verified_at,
             litter_bbox JSON, suspects JSON,
             status, cleanup_status, cleanup_assignee,
             fine_amount, notice_number UNIQUE, notice_issued_at, due_date, paid_at, payment_ref,
@@ -406,7 +435,7 @@ State machine (`server/workflow.py`):
 Rules enforced on the server:
 * Reject needs a reason.
 * No notice for an unattributed case.
-* No vehicle notice without a valid plate.
+* No vehicle notice without a valid plate **that an officer has verified**. An automatically read plate stays "not verified" until someone presses **Plate verified**; picking an alternative or typing the plate counts as verifying it. The officer's name and the time are stored and printed on the notice.
 * The plate cannot change after a notice.
 * The fine cannot be negative.
 * Due date = issue date + 15 days.
@@ -422,7 +451,7 @@ Rules enforced on the server:
 |---|---|
 | **Overview** (command centre) | Incidents today (hero number), awaiting review, overdue notices, fines collected/levied, cleanup pending + officer-confirmed accuracy; incidents per day (stacked by offender type, with a table view); time-of-day histogram; enforcement pipeline counts; latest detections; repeat offenders by plate; vehicle offences by category; camera status. Refreshes every 5 s. |
 | **Offence register** | Searchable (plate / notice no. / #id), filterable (type, status, cleanup, date range, overdue) paged list with thumbnails, plate badges, status and cleanup chips. Filters are kept in the URL, so links can be shared. |
-| **Case review** | Evidence viewer (clip, scene, person/vehicle, plate, litter), detection facts (attribution and OCR confidence, linked rider, other suspects), repeat-offender warning, the actions valid for the current state, cleanup tracking, notes and the full audit trail. |
+| **Case review** | Evidence viewer (clip, scene, person/vehicle, plate, enhanced plate, litter), detection facts (attribution confidence, plate reading, linked rider, other suspects), repeat-offender warning, the actions valid for the current state, cleanup tracking, notes and the full audit trail. For vehicles, a **plate check** panel shows the camera crop next to the enhanced crop, the automatic reading with its confidence (high / medium / low), one-click alternative readings, and the **Plate verified** / **Correct plate** buttons. **Issue notice** stays disabled until the plate is verified. |
 | **Notice** | Printable notice (Print / save as PDF) with the notice number, offence details, evidence photos, penalty and due date. Marked as a demonstration document. |
 | **Live camera** | The MJPEG feed from the edge plus live counters (fps, cache active/pushed/binned, incidents, uploads, upload errors). |
 | **How it works** | The pipeline explained for viewers and examiners. |
@@ -523,7 +552,8 @@ camera:  { source: "0", frame_stride: 2 }
 ## 12. Testing and results
 
 ```bash
-pytest                                  # 32 unit tests (~15 s)
+pytest                                  # 44 unit tests (~20 s)
+python tools/eval_plate_ocr.py --easyocr    # plate-reading accuracy, old vs new (~5 min)
 RUN_E2E=1 pytest tests/test_end_to_end.py   # full pipeline on the demo video (~2-3 min)
 cd dashboard && npm run build           # typecheck + build
 ```
@@ -531,9 +561,10 @@ cd dashboard && npm run build           # typecheck + build
 | Test file | What it covers |
 |---|---|
 | `test_plates.py` | Indian format normalisation, OCR confusion fixes, IND prefix, Delhi formats, BH series, two-line joining |
+| `test_plate_ocr.py` | Format-constrained decoding (letter/digit slots, nearest real state code, BH series, common-layout prior), multi-frame fusion reduces noise, tight crop, plate models read a degraded synthetic plate |
 | `test_cache_and_attribution.py` | Bin after hold time, pinned → pushed, best-crop selection, nearest actor blamed, bystander ignored, rider ↔ motorcycle link |
 | `test_litter.py` | Static object reported once and on time, moving person ignored, object under a standing person reported after they leave, short-lived object ignored, lighting change resets, scattered pile = one event + additions to it = a new event, someone present in the first frame leaves no ghost |
-| `test_server.py` | API key, upload + evidence, idempotent uid, input validation, full workflow, reject reason/reopen, plate correction, unattributed cleanup-only, filters/stats/heartbeat, dev video upload validation and on/off switch |
+| `test_server.py` | API key, upload + evidence, idempotent uid, input validation, full workflow, reject reason/reopen, plate correction, unattributed cleanup-only, filters/stats/heartbeat, dev video upload validation and on/off switch, notice blocked until the plate is verified, auto-read plate stored unverified with candidates, picking a candidate verifies it, old databases upgraded |
 | `test_end_to_end.py` | Real models on the synthetic video: exactly one person and one vehicle incident, plate read correctly, passer-by binned, evidence files present |
 
 **End-to-end results** (synthetic video, 4-core laptop CPU):
@@ -575,7 +606,7 @@ The synthetic video proves the logic, not real-world accuracy. Record a few minu
 | Parked cars or people standing still become "litter" | Raise `actor_margin` (0.2) and `actor_memory_seconds` (2.0) |
 | Littering blamed on a bystander | Lower `person_max_distance` (0.8); lower `lookback_seconds` |
 | Thrown-from-vehicle litter is unattributed | Raise `vehicle_max_distance` (2.0) and `lookback_seconds` (3.5); `hold_seconds` rises automatically |
-| Plates not read | Mount the camera so plates are at least ~20 px tall; raise `cache.vehicle_crops`; lower `models.plate.conf` to 0.15 |
+| Plates not read / low confidence | Mount the camera so plates are at least ~25 px tall; raise `cache.vehicle_crops` and `ocr.max_frames` (more frames to fuse); lower `models.plate.conf` to 0.15 |
 | Too slow | See section 11 |
 | Same litter reported twice | Raise `confirmed_miss_seconds`, `absorb_after_seconds` and `merge_seconds` |
 | One dumping act split into several incidents | Raise `group_px` (e.g. 25) and `merge_seconds` |
@@ -591,7 +622,9 @@ The synthetic video proves the logic, not real-world accuracy. Record a few minu
 |---|---|
 | `cv2.imshow ... not implemented` | Both `opencv-python` and `opencv-python-headless` are installed (EasyOCR pulls the headless one). Use the browser preview, or reinstall `opencv-python` (section 10). |
 | `ModuleNotFoundError: lap` | `pip install lap` (needed by ByteTrack). |
+| `ZoneInfoNotFoundError: 'No time zone found with key Asia/Kolkata'` (Windows) | Windows has no time-zone database: `pip install tzdata` (now in `requirements.txt`). The server also falls back to a fixed IST offset (+05:30) if it is missing. |
 | yolo26s fails to load | Needs `ultralytics >= 8.3.222`. |
+| Log says "fast-plate-ocr is not installed … using EasyOCR" | `pip install "fast-plate-ocr[onnx]"`. The first run downloads the two plate models (~5 MB each) into `~/.cache/fast-plate-ocr/`. |
 | Dashboard says "Cannot reach the server" | Start `python -m server.app`; in dev, Vite proxies to port 5000. |
 | Uploads fail with 401 | `server.api_key` in `edge/config.yaml` ≠ `LW_API_KEY`. |
 | Live page shows "preview unavailable" | `preview.enabled: true`; on the Pi set `preview.host: 0.0.0.0`; check that port 8090 is open. |

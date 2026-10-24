@@ -238,7 +238,9 @@ class IncidentWorker(threading.Thread):
 
         stamp = inc.occurred_at.astimezone().strftime("%d-%m-%Y %H:%M:%S")
         header = f"{cam.id} | {self.cfg.zone.name} | {stamp}"
-        rendered = [render(e, inc, header, plate.pretty if plate.valid else None) for e in inc.frames]
+        # burn the plate into the clip only when the reading is confident, and mark it as automatic
+        clip_plate = f"{plate.pretty} (auto-read)" if plate.valid and plate.level == "high" else None
+        rendered = [render(e, inc, header, clip_plate) for e in inc.frames]
         # Scene snapshot: the moment the litter first appeared, with the offender marked.
         scene_idx = min(range(len(inc.frames)), key=lambda i: abs(inc.frames[i].t - inc.t_appear)) if inc.frames else None
         if scene_idx is not None:
@@ -249,6 +251,7 @@ class IncidentWorker(threading.Thread):
         if vehicle:
             save("vehicle", vehicle.crops[0] if vehicle.crops else None)
         save("plate", plate.plate_image)
+        save("plate_enhanced", plate.enhanced)
 
         if len(inc.frames) > 1:
             span = inc.frames[-1].t - inc.frames[0].t
@@ -271,11 +274,13 @@ class IncidentWorker(threading.Thread):
             "vehicle_category": VEHICLE_CATEGORY.get(vehicle.cls_name) if vehicle else None,
             "linked_track": inc.linked.key if inc.linked else None,
             "plate": {
-                # An unreadable plate is sent as "not read" (with the raw OCR guesses) so the
-                # officer types it in from plate.jpg, instead of a wrong number being stored.
+                # Only a valid Indian-format reading is filled in (with its confidence level and
+                # runner-up candidates); the server keeps it "unverified" until an officer confirms
+                # or corrects it, and no notice can be issued before that.
                 "text": plate.text if plate.valid else None,
                 "pretty": plate.pretty if plate.valid else None,
-                "confidence": plate.confidence, "valid": plate.valid,
+                "confidence": plate.confidence, "valid": plate.valid, "level": plate.level,
+                "candidates": plate.candidates[:3], "engine": plate.engine,
                 "raw": plate.raw[:12], "detections": plate.detections,
             } if vehicle else None,
             "litter_bbox": [round(v, 1) for v in inc.litter_box],

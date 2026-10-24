@@ -8,7 +8,7 @@ College project: a camera-side AI pipeline that catches **people and vehicles th
 | People | `models/yolo26s.pt` + ByteTrack |
 | Litter | Background model of the clean zone: a new object that stays still after someone passes |
 | Who did it | A 3–5 s cache of every person/vehicle: *pushed* into the incident if they littered, otherwise *binned* |
-| Plates | `models/license_plate.pt` + EasyOCR + Indian format correction (KA 01 AB 1234, 22 BH 1234 AA) |
+| Plates | `models/license_plate.pt` finds the plate; multi-frame enhancement + licence-plate OCR models read it as an Indian number (KA 01 AB 1234, 22 BH 1234 AA); an officer must press **Plate verified** before any fine |
 | Server | Flask REST API + SQLite, review → notice → payment workflow + cleanup tracking |
 | Dashboard | React + TypeScript (overview, offence register, case review, printable notice, live camera) |
 

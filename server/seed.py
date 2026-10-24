@@ -91,6 +91,12 @@ def main() -> None:
         conn.execute("INSERT INTO audit_log (incident_id, at, actor, action, to_value, note) VALUES (?, ?, ?, ?, ?, ?)",
                      (cur.lastrowid, occurred.isoformat(), f"Camera {cam[0]}", "detected", "pending_review",
                       "Sample record generated for demonstration"))
+    # sample plates: those that already got a notice were verified by an officer
+    conn.execute("UPDATE incidents SET plate_level = 'high', plate_verified = 1, plate_verified_by = 'Sample officer', "
+                 "plate_verified_at = notice_issued_at WHERE is_sample = 1 AND offender_type = 'vehicle' "
+                 "AND status IN ('notice_issued', 'paid', 'escalated')")
+    conn.execute("UPDATE incidents SET plate_level = 'medium' WHERE is_sample = 1 AND offender_type = 'vehicle' "
+                 "AND plate_level IS NULL")
     conn.commit()
     print(f"added {args.count} sample incidents (remove with --purge)")
 
