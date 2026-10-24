@@ -384,10 +384,6 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .modal h3 { font-size: 17px; }
 .modal .row { display: flex; gap: 8px; justify-content: flex-end; }
 
-/* ------------------------------------------------------------------ login */
-.login-page { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; background: var(--page); }
-.login-card { width: min(400px, 100%); padding: 28px; display: flex; flex-direction: column; gap: 18px; }
-
 /* ------------------------------------------------------------------ plate review */
 .plate-review { display: flex; flex-direction: column; gap: 12px; }
 .plate-review .row { display: flex; gap: 8px; flex-wrap: wrap; }

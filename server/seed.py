@@ -25,19 +25,6 @@ def sample_plate(rng: random.Random) -> str:
     return f"{rng.choice(STATES)}00{''.join(rng.choices(string.ascii_uppercase, k=2))}{rng.randint(1000, 9999)}"
 
 
-def seed_if_empty(s: Settings, count: int) -> int:
-    """Add sample incidents only when there are no incidents yet (LW_SEED_SAMPLE on a fresh server)."""
-    init_db(s.db_path)
-    conn = connect(s.db_path)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]:
-            return 0
-        add_samples(conn, s, count, 42)
-        return count
-    finally:
-        conn.close()
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--count", type=int, default=60)
@@ -53,19 +40,14 @@ def main() -> None:
         conn.commit()
         print(f"removed {n} sample incidents")
         return
-    add_samples(conn, s, args.count, args.seed)
-    print(f"added {args.count} sample incidents (remove with --purge)")
-
-
-def add_samples(conn, s: Settings, count: int, seed: int) -> None:
-    rng = random.Random(seed)
+    rng = random.Random(args.seed)
     cams = [("SAMPLE-CAM-1", "Sample: Market road", "Ward 12"), ("SAMPLE-CAM-2", "Sample: Bus stand", "Ward 7")]
     for cid, name, ward in cams:
         conn.execute("INSERT OR IGNORE INTO cameras (id, name, location, ward, zone, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                      (cid, name, name.split(": ")[1], ward, "Clean Zone A", now_iso()))
     repeaters = [sample_plate(rng) for _ in range(3)]
     now = datetime.now(timezone.utc)
-    for i in range(count):
+    for i in range(args.count):
         occurred = now - timedelta(days=rng.random() ** 1.3 * 14, hours=0)
         hour = rng.choices(range(24), weights=[1, 1, 1, 1, 1, 2, 4, 6, 8, 7, 6, 6, 7, 6, 5, 6, 7, 9, 10, 9, 6, 4, 2, 1])[0]
         occurred = occurred.replace(hour=(hour - 5) % 24, minute=rng.randint(0, 59))  # IST hour -> UTC
@@ -116,6 +98,7 @@ def add_samples(conn, s: Settings, count: int, seed: int) -> None:
     conn.execute("UPDATE incidents SET plate_level = 'medium' WHERE is_sample = 1 AND offender_type = 'vehicle' "
                  "AND plate_level IS NULL")
     conn.commit()
+    print(f"added {args.count} sample incidents (remove with --purge)")
 
 
 if __name__ == "__main__":

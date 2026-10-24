@@ -520,17 +520,6 @@ Both incidents appear in the Offence register about 15 s after detection.
 
 ---
 
-### Putting it online
-
-To host the dashboard on Vercel and the API server on Render, follow [DEPLOYMENT.md](DEPLOYMENT.md). For that setup the server gained:
-* `LW_CORS_ORIGINS`: browser access from the Vercel site;
-* `LW_DASHBOARD_PASSWORD`: an access-code login with signed, expiring tokens. Evidence links carry the token; the camera keeps using its API key.
-* `LW_SEED_SAMPLE`: sample cases on an empty database.
-
-The dashboard reads the API address from `VITE_API_BASE`.
-
----
-
 ## 11. Moving to the Raspberry Pi
 
 **Hardware:** a Raspberry Pi 4 (4 GB+) or Pi 5, a camera (Pi Camera via `libcamera` / USB webcam / IP camera RTSP), Raspberry Pi OS 64-bit.

@@ -1,33 +1,22 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
-import { api, AUTH_REQUIRED_EVENT, getToken, type Settings } from "./api";
+import { api, type Settings } from "./api";
 import Layout from "./components/Layout";
 import { AppProvider, Empty } from "./components/ui";
 import HowItWorks from "./pages/HowItWorks";
 import IncidentDetail from "./pages/IncidentDetail";
 import Incidents from "./pages/Incidents";
 import Live from "./pages/Live";
-import Login from "./pages/Login";
 import Notice from "./pages/Notice";
 import Overview from "./pages/Overview";
 import "./styles.css";
 
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [needLogin, setNeedLogin] = useState(false);
   useEffect(() => {
-    api.settings()
-      .then((s) => {
-        setSettings(s);
-        if (s.auth_required && !getToken()) setNeedLogin(true);
-      })
-      .catch(() => setSettings(null));
-    const onAuth = () => setNeedLogin(true);
-    window.addEventListener(AUTH_REQUIRED_EVENT, onAuth);
-    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuth);
+    api.settings().then(setSettings).catch(() => setSettings(null));
   }, []);
-  if (needLogin) return <Login settings={settings} onDone={() => setNeedLogin(false)} />;
   return (
     <AppProvider settings={settings}>
       <BrowserRouter>

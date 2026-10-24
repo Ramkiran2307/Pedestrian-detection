@@ -27,10 +27,6 @@ Use your own camera with `python -m edge.run --source 0`, and draw its clean zon
 
 **Testing with footage, no terminal needed:** open the dashboard, scroll to **Test with your own footage** at the bottom of the Overview, and upload a video. It is processed on the server machine and the dashboard updates itself when the incidents arrive (development tool; turn it off with `LW_DEV_TOOLS=0`).
 
-## Put it online
-
-Dashboard on **Vercel**, API server on **Render**, AI pipeline stays on the laptop / Pi: step-by-step in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (`render.yaml` and `dashboard/vercel.json` are ready; the online dashboard is protected by an access code).
-
 ## Documentation
 
 **[docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md)** explains everything in detail: architecture, every algorithm and setting, what changed from the original scripts (kept in `legacy/`), the Indian municipal workflow, the Raspberry Pi deployment, tests and results, tuning, limitations and privacy.
