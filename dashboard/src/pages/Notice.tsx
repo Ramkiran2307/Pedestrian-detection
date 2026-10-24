@@ -53,7 +53,7 @@ export default function Notice() {
             <tr><td>Date and time of offence</td><td>{fmtDateTime(d.occurred_at)}</td></tr>
             <tr><td>Place</td><td>{d.location || "—"} ({d.zone}), {d.ward || ""}</td></tr>
             <tr><td>Offender</td><td>{vehicle ? `${VEHICLE_LABEL[d.vehicle_category || "other"] || "Vehicle"} (${d.vehicle_class || "vehicle"})` : offenderLabel(d)}</td></tr>
-            {vehicle && <tr><td>Registration number</td><td><b>{d.plate_display}</b></td></tr>}
+            {vehicle && <tr><td>Registration number</td><td><b>{d.plate_display}</b>{d.plate_verified_by ? ` (checked by ${d.plate_verified_by})` : ""}</td></tr>}
             <tr><td>Case reference</td><td>#{d.id} · {d.uid}</td></tr>
             <tr><td>Penalty</td><td><b>{inr(d.fine_amount)}</b></td></tr>
             <tr><td>Pay by</td><td>{fmtDate(d.due_date)}</td></tr>

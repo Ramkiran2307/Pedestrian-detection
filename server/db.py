@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS incidents (
     plate_valid       INTEGER,
     plate_raw         TEXT,
     plate_corrected   INTEGER NOT NULL DEFAULT 0,
+    plate_level       TEXT,
+    plate_candidates  TEXT,
+    plate_engine      TEXT,
+    plate_verified    INTEGER NOT NULL DEFAULT 0,
+    plate_verified_by TEXT,
+    plate_verified_at TEXT,
     litter_bbox       TEXT,
     suspects          TEXT,
     status            TEXT NOT NULL DEFAULT 'pending_review',
@@ -107,8 +113,23 @@ def connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the first release: added to existing databases on start-up.
+MIGRATIONS = {
+    "incidents": [
+        ("plate_level", "TEXT"), ("plate_candidates", "TEXT"), ("plate_engine", "TEXT"),
+        ("plate_verified", "INTEGER NOT NULL DEFAULT 0"), ("plate_verified_by", "TEXT"), ("plate_verified_at", "TEXT"),
+    ],
+}
+
+
 def init_db(path: Path) -> None:
     with connect(path) as conn:
+        for table, columns in MIGRATIONS.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if existing:  # table exists (older database): add what is missing
+                for name, decl in columns:
+                    if name not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         conn.executescript(SCHEMA)
 
 
@@ -116,13 +137,13 @@ def row_to_dict(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
     d = dict(row)
-    for key in ("litter_bbox", "suspects", "plate_raw", "stats"):
+    for key in ("litter_bbox", "suspects", "plate_raw", "plate_candidates", "stats"):
         if key in d and isinstance(d[key], str):
             try:
                 d[key] = json.loads(d[key])
             except ValueError:
                 pass
-    for key in ("plate_valid", "plate_corrected", "is_sample"):
+    for key in ("plate_valid", "plate_corrected", "plate_verified", "is_sample"):
         if key in d and d[key] is not None:
             d[key] = bool(d[key])
     return d

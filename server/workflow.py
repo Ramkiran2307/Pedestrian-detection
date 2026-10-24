@@ -31,7 +31,7 @@ TRANSITIONS: dict[str, tuple[set[str], str]] = {
     "reopen":       ({"rejected"}, "pending_review"),
 }
 CLEANUP_ACTIONS = {"assign_cleanup": "assigned", "mark_cleaned": "cleaned"}
-OTHER_ACTIONS = {"correct_plate", "add_note"}
+OTHER_ACTIONS = {"verify_plate", "correct_plate", "add_note"}
 ALL_ACTIONS = set(TRANSITIONS) | set(CLEANUP_ACTIONS) | OTHER_ACTIONS
 
 PLATE_RE = re.compile(r"^([A-Z]{2}\d{1,2}[A-Z]{0,3}\d{4}|\d{2}BH\d{4}[A-Z]{1,2})$")
@@ -80,8 +80,14 @@ def apply_action(conn: sqlite3.Connection, settings: Settings, incident: dict, b
                 raise WorkflowError("A reason is required to reject an incident")
             updates["rejection_reason"] = reason
         if action == "issue_notice":
-            if incident["offender_type"] == "vehicle" and not (incident.get("plate_number") and incident.get("plate_valid")):
-                raise WorkflowError("Add or correct the number plate before issuing a notice")
+            if incident["offender_type"] == "vehicle":
+                if not (incident.get("plate_number") and incident.get("plate_valid")):
+                    raise WorkflowError("Add or correct the number plate before issuing a notice")
+                if not incident.get("plate_verified"):
+                    # The plate was read automatically: a person must check it against the photo
+                    # first, so a fine never goes to the wrong vehicle owner.
+                    raise WorkflowError("Check the number plate against the photo and press 'Plate verified' "
+                                        "(or correct it) before issuing a notice")
             amount = body.get("fine_amount")
             amount = fine_for(settings, incident) if amount in (None, "") else int(amount)
             if amount < 0:
@@ -106,6 +112,16 @@ def apply_action(conn: sqlite3.Connection, settings: Settings, incident: dict, b
             updates["cleanup_assignee"] = (body.get("assignee") or "").strip() or "Ward sanitation team"
         log_from, log_to = incident["cleanup_status"], new
 
+    elif action == "verify_plate":
+        if incident["offender_type"] != "vehicle":
+            raise WorkflowError("Only vehicle cases have a number plate to verify")
+        if not (incident.get("plate_number") and incident.get("plate_valid")):
+            raise WorkflowError("There is no plate reading to verify; enter the plate instead")
+        if incident.get("plate_verified"):
+            raise WorkflowError("The plate is already verified")
+        updates.update(plate_verified=1, plate_verified_by=actor, plate_verified_at=now_iso())
+        log_from, log_to = "unverified", incident["plate_number"]
+
     elif action == "correct_plate":
         plate = re.sub(r"[^A-Z0-9]", "", str(body.get("plate") or "").upper())
         if not PLATE_RE.match(plate):
@@ -114,7 +130,9 @@ def apply_action(conn: sqlite3.Connection, settings: Settings, incident: dict, b
             raise WorkflowError("Mark the offender before adding a plate")
         if incident["status"] in ("notice_issued", "paid", "escalated"):
             raise WorkflowError("The plate cannot change after a notice was issued")
-        updates.update(plate_number=plate, plate_display=pretty_plate(plate), plate_valid=1, plate_corrected=1)
+        # A plate typed or picked by an officer counts as verified by that officer.
+        updates.update(plate_number=plate, plate_display=pretty_plate(plate), plate_valid=1, plate_corrected=1,
+                       plate_verified=1, plate_verified_by=actor, plate_verified_at=now_iso())
         log_from, log_to = incident.get("plate_number"), plate
 
     elif action == "add_note":

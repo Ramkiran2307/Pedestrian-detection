@@ -1,27 +1,28 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  AlertTriangle, ArrowLeft, BadgeCheck, Ban, CheckCircle2, FileText, Film, Info, Pencil, RotateCcw, Sparkles,
+  AlertTriangle, ArrowLeft, BadgeCheck, Ban, CheckCircle2, FileText, Film, Info, RotateCcw, Sparkles,
   StickyNote, Truck,
 } from "lucide-react";
 import {
   api, ApiError, cap, CLEANUP_LABEL, fmtDate, fmtDateTime, inr, offenderLabel, STATUS_LABEL, VEHICLE_LABEL,
   type IncidentDetail as Detail, type Status,
 } from "../api";
-import { CleanupChip, Empty, Modal, OverdueBadge, Plate, SampleBadge, StatusBadge, useApp, usePolling } from "../components/ui";
+import PlateReview from "../components/PlateReview";
+import { CleanupChip, Empty, Modal, OverdueBadge, SampleBadge, StatusBadge, useApp, usePolling } from "../components/ui";
 
 const EVIDENCE_ORDER = [
   ["clip", "Video clip"], ["scene", "Scene"], ["person", "Person"], ["vehicle", "Vehicle"],
-  ["plate", "Number plate"], ["litter", "Litter"],
+  ["plate", "Number plate"], ["plate_enhanced", "Plate (enhanced)"], ["litter", "Litter"],
 ] as const;
 
 const ACTION_TEXT: Record<string, string> = {
   detected: "Detected by camera", verify: "Evidence verified", reject: "Rejected", issue_notice: "Notice issued",
   mark_paid: "Fine paid", escalate: "Escalated", reopen: "Reopened for review", assign_cleanup: "Cleanup assigned",
-  mark_cleaned: "Litter cleaned", correct_plate: "Plate corrected", add_note: "Note added",
+  mark_cleaned: "Litter cleaned", correct_plate: "Plate corrected", verify_plate: "Plate verified", add_note: "Note added",
 };
 
-type Dialog = null | "reject" | "notice" | "paid" | "plate" | "cleanup" | "note";
+type Dialog = null | "reject" | "notice" | "paid" | "plate" | "pick" | "cleanup" | "note";
 
 export default function IncidentDetail() {
   const { id } = useParams();
@@ -105,7 +106,10 @@ export default function IncidentDetail() {
               <div><div className="k">Attribution confidence</div><div className="v">{d.attribution_score ? `${Math.round(d.attribution_score * 100)}%` : "No suspect"}</div></div>
               {isVehicle && <>
                 <div><div className="k">Vehicle category</div><div className="v">{VEHICLE_LABEL[d.vehicle_category || "other"] || cap(d.vehicle_category || "")}</div></div>
-                <div><div className="k">Plate OCR confidence</div><div className="v">{d.plate_confidence ? `${Math.round(d.plate_confidence * 100)}%` : "—"}{d.plate_corrected ? " · corrected by officer" : ""}</div></div>
+                <div><div className="k">Plate reading</div><div className="v">
+                  {d.plate_corrected ? "Entered by officer" : d.plate_confidence ? `${Math.round(d.plate_confidence * 100)}% (${d.plate_level || "auto"})` : "—"}
+                  {d.plate_verified ? " · verified" : d.plate_number ? " · not verified" : ""}
+                </div></div>
               </>}
               {d.linked_track && <div><div className="k">Linked actor</div><div className="v">{d.linked_track} {d.offender_type === "person" ? "(vehicle ridden)" : "(rider / driver)"}</div></div>}
               <div><div className="k">Camera</div><div className="v">{d.camera?.name || d.camera_id}</div></div>
@@ -142,17 +146,10 @@ export default function IncidentDetail() {
             <div className="section-title">{isVehicle ? "Vehicle" : d.offender_type === "person" ? "Pedestrian" : "Offender"}</div>
             <div style={{ padding: "14px 20px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
               {isVehicle && (
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <Plate text={d.plate_display} large />
-                  {!["notice_issued", "paid", "escalated"].includes(d.status) && (
-                    <button className="btn ghost" onClick={() => { setForm({ plate: d.plate_number || "" }); setDialog("plate"); }}>
-                      <Pencil /> {d.plate_number ? "Correct" : "Enter plate"}
-                    </button>
-                  )}
-                </div>
-              )}
-              {isVehicle && d.plate_valid === false && d.plate_number && (
-                <div className="callout warn"><AlertTriangle />OCR text does not match the Indian plate format. Check the plate photo and correct it.</div>
+                <PlateReview d={d} busy={busy}
+                  onVerify={() => act("verify_plate")}
+                  onPick={(plate) => { setForm({ plate }); setDialog("pick"); }}
+                  onEdit={() => { setForm({ plate: d.plate_number || "" }); setDialog("plate"); }} />
               )}
               {d.offender_type === "person" && (
                 <div className="callout"><Info />Pedestrian identified by photographic evidence only. Serve the notice on the spot or through the ward office.</div>
@@ -184,8 +181,15 @@ export default function IncidentDetail() {
               {d.status === "verified" && d.offender_type !== "unknown" && (
                 <>
                   <p className="sub" style={{ margin: 0 }}>Suggested spot fine: <b>{inr(d.suggested_fine)}</b> (as per fine schedule).</p>
+                  {isVehicle && !d.plate_verified && (
+                    <div className="callout warn"><AlertTriangle />
+                      <div>Verify the number plate in the <b>Vehicle</b> panel before issuing the notice.</div>
+                    </div>
+                  )}
                   <div className="row">
-                    <button className="btn primary" disabled={busy} onClick={() => { setForm({ fine: String(d.suggested_fine) }); setDialog("notice"); }}><FileText /> Issue notice</button>
+                    <button className="btn primary" disabled={busy || (isVehicle && !d.plate_verified)}
+                            title={isVehicle && !d.plate_verified ? "Verify the number plate first" : undefined}
+                            onClick={() => { setForm({ fine: String(d.suggested_fine) }); setDialog("notice"); }}><FileText /> Issue notice</button>
                     <button className="btn danger" disabled={busy} onClick={() => setDialog("reject")}><Ban /> Reject</button>
                   </div>
                 </>
@@ -283,10 +287,31 @@ export default function IncidentDetail() {
           </div>
         </Modal>
       )}
+      {dialog === "pick" && (
+        <Modal title="Use this reading?" onClose={() => setDialog(null)}>
+          <div className="plate-shots">
+            {d.evidence.plate && <figure><img src={d.evidence.plate} alt="Plate as seen by the camera" /><figcaption>Camera</figcaption></figure>}
+            {d.evidence.plate_enhanced && <figure><img src={d.evidence.plate_enhanced} alt="Enhanced plate" /><figcaption>Enhanced</figcaption></figure>}
+          </div>
+          <p className="sub" style={{ margin: 0 }}>
+            The plate will be set to <b className="mono">{form.plate}</b> and marked as verified by you.
+          </p>
+          <div className="row">
+            <button className="btn" onClick={() => setDialog(null)}>Cancel</button>
+            <button className="btn primary" disabled={busy} onClick={() => act("correct_plate", { plate: form.plate })}>Use and verify</button>
+          </div>
+        </Modal>
+      )}
       {dialog === "plate" && (
-        <Modal title="Correct number plate" onClose={() => setDialog(null)}>
-          {d.evidence.plate && <img src={d.evidence.plate} alt="Plate crop" style={{ borderRadius: 8, maxHeight: 90, objectFit: "contain", background: "#111" }} />}
-          {d.plate_raw && d.plate_raw.length > 0 && <div className="cell-sub">OCR read: {Array.from(new Set(d.plate_raw)).slice(0, 4).join(", ")}</div>}
+        <Modal title={d.plate_number ? "Correct number plate" : "Enter number plate"} onClose={() => setDialog(null)}>
+          <div className="plate-shots">
+            {d.evidence.plate && <figure><img src={d.evidence.plate} alt="Plate as seen by the camera" /><figcaption>Camera</figcaption></figure>}
+            {d.evidence.plate_enhanced && <figure><img src={d.evidence.plate_enhanced} alt="Enhanced plate" /><figcaption>Enhanced</figcaption></figure>}
+          </div>
+          {d.plate_candidates && d.plate_candidates.length > 0 && (
+            <div className="cell-sub">Automatic readings: {d.plate_candidates.map((c) => `${c.pretty || c.text} (${Math.round(c.confidence * 100)}%)`).join(", ")}</div>
+          )}
+          <p className="cell-sub" style={{ margin: 0 }}>The plate you save is marked as verified by you.</p>
           <div className="field"><label htmlFor="plate">Plate (e.g. KA01AB1234 or 22BH1234AA)</label>
             <input id="plate" className="input mono" value={form.plate || ""} onChange={(e) => setForm({ ...form, plate: e.target.value.toUpperCase() })} />
           </div>

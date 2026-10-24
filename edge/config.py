@@ -86,7 +86,7 @@ class CacheCfg:
     hold_seconds: float = 4.0
     history_seconds: float = 12.0
     person_crops: int = 3
-    vehicle_crops: int = 5
+    vehicle_crops: int = 12
     crop_every_n: int = 2
 
 
@@ -101,6 +101,13 @@ class AttributionCfg:
 
 @dataclass
 class OcrCfg:
+    # "plate-ocr": multi-frame enhancement + licence-plate OCR models (default)
+    # "easyocr":   the original general text reader
+    engine: str = "plate-ocr"
+    plate_models: list[str] = field(default_factory=lambda: ["cct-s-v2-global-model", "cct-xs-v2-global-model"])
+    max_frames: int = 12              # sharpest plate crops used for enhancement
+    high_confidence: float = 0.65     # vote share for a "high confidence" reading
+    low_confidence: float = 0.3       # below this the reading is marked "low - check carefully"
     languages: list[str] = field(default_factory=lambda: ["en"])
     gpu: bool = False
     min_confidence: float = 0.15

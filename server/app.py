@@ -41,7 +41,7 @@ from .workflow import STATUSES, WorkflowError, apply_action, fine_for, pretty_pl
 
 log = logging.getLogger("litterwatch.server")
 
-EVIDENCE_KINDS = {"scene", "litter", "person", "vehicle", "plate", "clip"}
+EVIDENCE_KINDS = {"scene", "litter", "person", "vehicle", "plate", "plate_enhanced", "clip"}
 EVIDENCE_EXT = {".jpg", ".jpeg", ".png", ".mp4", ".webm"}
 UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 CAMERA_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
@@ -163,20 +163,23 @@ def create_app(settings: Settings | None = None) -> Flask:
             return jsonify(id=existing["id"], uid=uid, duplicate=True), 200
 
         plate = meta.get("plate") or {}
-        plate_text = plate.get("text") or None   # kept even if not a valid format: officers can correct it
+        # Stored as an automatic reading: plate_verified stays 0 until an officer confirms it.
+        plate_text = plate.get("text") or None
+        candidates = [c for c in (plate.get("candidates") or []) if isinstance(c, dict) and c.get("text")][:3]
         now = now_iso()
         cur = conn.execute(
             """INSERT INTO incidents (uid, camera_id, zone, ward, location, occurred_at, detected_at, received_at,
                    offender_type, offender_track, attribution_score, vehicle_class, vehicle_category, linked_track,
-                   plate_number, plate_display, plate_confidence, plate_valid, plate_raw, litter_bbox, suspects,
-                   updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   plate_number, plate_display, plate_confidence, plate_valid, plate_raw, plate_level,
+                   plate_candidates, plate_engine, litter_bbox, suspects, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (uid, cam.get("id"), meta.get("zone"), cam.get("ward"), cam.get("location"),
              occurred.isoformat(), (parse_time(meta.get("detected_at")) or occurred).isoformat(), now,
              offender_type, meta.get("offender_track"), meta.get("attribution_score"),
              meta.get("vehicle_class"), meta.get("vehicle_category"), meta.get("linked_track"),
              plate_text, plate.get("pretty") or pretty_plate(plate_text), plate.get("confidence"),
              int(bool(plate.get("valid"))) if plate else None, json.dumps(plate.get("raw") or []),
+             plate.get("level") or None, json.dumps(candidates), plate.get("engine") or None,
              json.dumps(meta.get("litter_bbox")), json.dumps(meta.get("suspects") or []), now))
         incident_id = cur.lastrowid
 
@@ -265,6 +268,8 @@ def create_app(settings: Settings | None = None) -> Flask:
                 except ValueError:
                     abort(400, description=f"'{key}' must be YYYY-MM-DD")
                 where.append(f"occurred_at {op} ?"); params.append(day.astimezone(timezone.utc).isoformat())
+        if args.get("plate") == "unverified":
+            where.append("offender_type = 'vehicle' AND plate_verified = 0 AND status NOT IN ('rejected')")
         if args.get("overdue") == "1":
             where.append("status = 'notice_issued' AND due_date < ?"); params.append(now_iso())
         clause = f"WHERE {' AND '.join(where)}" if where else ""
@@ -315,7 +320,7 @@ def create_app(settings: Settings | None = None) -> Flask:
         conn = db()
         rows = [dict(r) for r in conn.execute(
             "SELECT id, occurred_at, offender_type, vehicle_category, status, cleanup_status, fine_amount, "
-            "plate_number, plate_display, due_date FROM incidents")]
+            "plate_number, plate_display, plate_verified, due_date FROM incidents")]
         now_utc = datetime.now(timezone.utc)
         today = now_utc.astimezone(tz).date()
         days = min(90, max(7, request.args.get("days", 14, type=int)))
@@ -351,7 +356,9 @@ def create_app(settings: Settings | None = None) -> Flask:
         return jsonify(
             totals={"all": len(rows), "today": today_count, "pending_review": by_status["pending_review"],
                     "overdue": overdue, "cleanup_pending": sum(1 for r in rows if r["cleanup_status"] != "cleaned"),
-                    "cameras": len(cams), "cameras_online": online},
+                    "cameras": len(cams), "cameras_online": online,
+                    "plates_unverified": sum(1 for r in rows if r["offender_type"] == "vehicle"
+                                             and not r["plate_verified"] and r["status"] != "rejected")},
             by_status={s: by_status[s] for s in STATUSES},
             by_type={t: by_type[t] for t in ("person", "vehicle", "unknown")},
             by_vehicle=dict(Counter(r["vehicle_category"] or "other" for r in rows if r["offender_type"] == "vehicle")),

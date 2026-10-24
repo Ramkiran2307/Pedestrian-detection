@@ -140,17 +140,29 @@ def join_fragments(fragments: list[tuple[list, str, float]]) -> tuple[str, float
 
 @dataclass
 class PlateResult:
-    text: str | None = None
+    text: str | None = None          # best reading (filled only when confident enough)
     pretty: str | None = None
     confidence: float = 0.0
-    valid: bool = False
+    valid: bool = False              # text is a valid Indian plate (it is filled in; an officer confirms it)
+    level: str = ""                  # "high" | "medium" | "low" confidence
     raw: list[str] = field(default_factory=list)
-    plate_image: np.ndarray | None = None
+    candidates: list[dict] = field(default_factory=list)   # top readings for the officer to pick from
+    plate_image: np.ndarray | None = None                  # sharpest original crop
+    enhanced: np.ndarray | None = None                     # multi-frame enhanced plate
     detections: int = 0
+    engine: str = ""
 
 
 class PlateReader:
-    """Loaded lazily inside the evidence worker thread (EasyOCR is slow to start)."""
+    """Find the plate in the cached vehicle crops and read it.
+
+    Engines (``ocr.engine`` in config.yaml):
+      * ``plate-ocr`` (default): multi-frame enhancement + licence-plate OCR models
+        + Indian-format decoding (see plate_ocr.py). Falls back to EasyOCR if the
+        fast-plate-ocr package is not installed.
+      * ``easyocr``: the original general-purpose reader, one vote per crop.
+    Loaded lazily inside the evidence worker thread (the models take a while to start).
+    """
 
     def __init__(self, plate_cfg: ModelCfg, ocr_cfg: OcrCfg, device: str):
         self.plate_cfg = plate_cfg
@@ -158,17 +170,31 @@ class PlateReader:
         self.device = device
         self._model = None
         self._reader = None
+        self._plate_ocr = None
+        self.engine = ocr_cfg.engine
 
-    def _load(self):
+    def _load_detector(self):
         if self._model is None:
             from ultralytics import YOLO
             self._model = YOLO(self.plate_cfg.weights)
+
+    def _load_easyocr(self):
         if self._reader is None:
             import easyocr
             self._reader = easyocr.Reader(self.ocr_cfg.languages, gpu=self.ocr_cfg.gpu, verbose=False)
 
+    def _load_plate_ocr(self) -> bool:
+        if self._plate_ocr is None and self.engine == "plate-ocr":
+            try:
+                from .plate_ocr import PlateOCR
+                self._plate_ocr = PlateOCR(self.ocr_cfg.plate_models, self.device)
+            except ImportError:
+                log.warning("fast-plate-ocr is not installed (pip install 'fast-plate-ocr[onnx]'); using EasyOCR")
+                self.engine = "easyocr"
+        return self._plate_ocr is not None
+
     def find_plate(self, vehicle_img: np.ndarray) -> tuple[np.ndarray, float] | None:
-        self._load()
+        self._load_detector()
         r = self._model(vehicle_img, conf=self.plate_cfg.conf, imgsz=self.plate_cfg.imgsz,
                         device=self.device, verbose=False)[0]
         if r.boxes is None or len(r.boxes) == 0:
@@ -192,7 +218,8 @@ class PlateReader:
         return [big, clahe]
 
     def ocr(self, plate: np.ndarray) -> list[tuple[str, float]]:
-        self._load()
+        """EasyOCR on one plate crop (two variants)."""
+        self._load_easyocr()
         out = []
         for img in self._variants(plate):
             frags = self._reader.readtext(img, allowlist=ALNUM, detail=1, paragraph=False)
@@ -202,20 +229,15 @@ class PlateReader:
                 out.append((text, conf))
         return out
 
-    def read(self, vehicle_crops: list[np.ndarray]) -> PlateResult:
-        result = PlateResult()
+    # ------------------------------------------------------------ engines
+    def ocr_crops(self, plates: list[np.ndarray], det_confs: list[float] | None = None) -> PlateResult:
+        """The original EasyOCR approach: read every crop, vote on the normalised text."""
+        result = PlateResult(engine="easyocr")
+        det_confs = det_confs or [1.0] * len(plates)
         votes: dict[str, float] = defaultdict(float)
         confs: dict[str, list[float]] = defaultdict(list)
         guesses: dict[str, PlateGuess] = {}
-        best_plate, best_plate_conf = None, -1.0
-        for crop in vehicle_crops:
-            found = self.find_plate(crop)
-            if found is None:
-                continue
-            plate, det_conf = found
-            result.detections += 1
-            if det_conf > best_plate_conf:
-                best_plate, best_plate_conf = plate, det_conf
+        for plate, det_conf in zip(plates, det_confs):
             for text, conf in self.ocr(plate):
                 result.raw.append(text)
                 g = normalize_indian_plate(text)
@@ -223,14 +245,57 @@ class PlateReader:
                 confs[g.text].append(conf)
                 if g.text not in guesses or (g.valid and not guesses[g.text].valid):
                     guesses[g.text] = g
-        result.plate_image = best_plate
         if votes:
-            winner = max(votes, key=votes.get)
-            g = guesses[winner]
-            share = votes[winner] / sum(votes.values())   # how much the reads agree
-            mean_conf = float(np.mean(confs[winner]))
+            ranked = sorted(votes, key=votes.get, reverse=True)
+            g = guesses[ranked[0]]
+            share = votes[ranked[0]] / sum(votes.values())   # how much the reads agree
+            mean_conf = float(np.mean(confs[ranked[0]]))
             result.text, result.pretty, result.valid = g.text, g.pretty, g.valid
             result.confidence = round(mean_conf * (0.5 + 0.5 * share) * (1.0 if g.valid else 0.5), 3)
-        log.info("plate read: %s (valid=%s, conf=%.2f, raw=%s)", result.text, result.valid,
-                 result.confidence, result.raw)
+            result.candidates = [{"text": guesses[t].text, "pretty": guesses[t].pretty,
+                                  "confidence": round(votes[t] / sum(votes.values()), 3)}
+                                 for t in ranked[:3] if guesses[t].valid]
+        return result
+
+    def ocr_plate_model(self, plates: list[np.ndarray]) -> PlateResult:
+        """Multi-frame enhancement + plate OCR ensemble + Indian-format decoding."""
+        res = self._plate_ocr.read(plates, max_frames=self.ocr_cfg.max_frames)
+        result = PlateResult(engine="plate-ocr", enhanced=res.enhanced)
+        result.candidates = [{"text": c.text, "pretty": PlateGuess(c.text, True, 0, c.fmt).pretty,
+                              "confidence": round(c.confidence, 3)} for c in res.candidates]
+        result.raw = [c.text for c in res.candidates]
+        if res.candidates:
+            best = res.candidates[0]
+            result.confidence = round(best.confidence, 3)
+            result.text = best.text
+            result.pretty = result.candidates[0]["pretty"]
+            result.valid = True      # constrained decoding only produces valid Indian formats
+            result.level = self.level(best.confidence)
+        return result
+
+    def level(self, confidence: float) -> str:
+        if confidence >= self.ocr_cfg.high_confidence:
+            return "high"
+        return "medium" if confidence >= self.ocr_cfg.low_confidence else "low"
+
+    def read(self, vehicle_crops: list[np.ndarray]) -> PlateResult:
+        plates, det_confs = [], []
+        for crop in vehicle_crops:
+            found = self.find_plate(crop)
+            if found is not None:
+                plates.append(found[0])
+                det_confs.append(found[1])
+        if not plates:
+            log.info("plate read: no plate found in %d vehicle crops", len(vehicle_crops))
+            return PlateResult(engine=self.engine)
+        if self._load_plate_ocr():
+            result = self.ocr_plate_model(plates)
+        else:
+            result = self.ocr_crops(plates, det_confs)
+            result.level = self.level(result.confidence) if result.valid else ""
+        result.detections = len(plates)
+        result.plate_image = plates[int(np.argmax(det_confs))]
+        log.info("plate read (%s, %d crops): %s (%s confidence %.2f, candidates=%s)", result.engine,
+                 len(plates), result.text, result.level or "invalid", result.confidence,
+                 [c["text"] for c in result.candidates])
         return result

@@ -59,7 +59,7 @@ cache:
   hold_seconds: 4.0           # keep each person/vehicle 4 s after it leaves, then bin it
   history_seconds: 12
   person_crops: 3
-  vehicle_crops: 5
+  vehicle_crops: 12          # more views of the vehicle = more plate frames to enhance
   crop_every_n: 2
 
 attribution:
@@ -69,7 +69,12 @@ attribution:
   report_unattributed: true   # still report litter even if nobody could be blamed
 
 ocr:
-  languages: [en]
+  engine: plate-ocr           # plate-ocr = enhance blurry plates + licence-plate OCR models; easyocr = old reader
+  plate_models: [cct-s-v2-global-model, cct-xs-v2-global-model]
+  max_frames: 12              # sharpest plate crops fused for enhancement
+  high_confidence: 0.65       # the best reading is always filled in; these only label how sure it is
+  low_confidence: 0.3         # (an officer confirms every plate before a notice can be issued)
+  languages: [en]             # EasyOCR settings (fallback engine)
   gpu: false
   min_confidence: 0.15
 

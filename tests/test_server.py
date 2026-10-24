@@ -73,12 +73,16 @@ def test_full_enforcement_workflow(client):
     iid = post(client, meta()).get_json()["id"]
     assert act(client, iid, action="issue_notice").status_code == 409        # must verify first
     assert act(client, iid, action="verify").status_code == 200
+    r = act(client, iid, action="issue_notice")                              # plate not verified yet
+    assert r.status_code == 409 and "Plate verified" in r.get_json()["error"]
+    d = act(client, iid, action="verify_plate").get_json()
+    assert d["plate_verified"] and d["plate_verified_by"] == "SI Rao"
     d = act(client, iid, action="issue_notice").get_json()
     assert d["status"] == "notice_issued" and d["fine_amount"] == 2000        # car fine from schedule
     assert d["notice_number"].startswith("SWM/WARD12/")
     d = act(client, iid, action="mark_paid", payment_ref="UPI123").get_json()
     assert d["status"] == "paid" and d["payment_ref"] == "UPI123"
-    assert [t["action"] for t in d["timeline"]] == ["detected", "verify", "issue_notice", "mark_paid"]
+    assert [t["action"] for t in d["timeline"]] == ["detected", "verify", "verify_plate", "issue_notice", "mark_paid"]
     assert d["timeline"][1]["actor"] == "SI Rao"
 
 
@@ -159,3 +163,49 @@ def test_works_without_timezone_database(tmp_path, monkeypatch):
     tz = app_module.load_timezone("Asia/Kolkata")
     from datetime import datetime, timezone
     assert datetime(2026, 1, 1, tzinfo=timezone.utc).astimezone(tz).hour == 5
+
+
+def test_auto_read_plate_is_stored_unverified_with_candidates(client):
+    m = meta("P-1")
+    m["plate"].update(level="medium", engine="plate-ocr",
+                      candidates=[{"text": "KA01AB1234", "pretty": "KA 01 AB 1234", "confidence": 0.55},
+                                  {"text": "KA01AB1284", "pretty": "KA 01 AB 1284", "confidence": 0.3}])
+    iid = post(client, m).get_json()["id"]
+    d = client.get(f"/api/v1/incidents/{iid}").get_json()
+    assert d["plate_number"] == "KA01AB1234" and not d["plate_verified"] and d["plate_level"] == "medium"
+    assert [c["text"] for c in d["plate_candidates"]] == ["KA01AB1234", "KA01AB1284"]
+    assert client.get("/api/v1/stats").get_json()["totals"]["plates_unverified"] == 1
+    assert client.get("/api/v1/incidents?plate=unverified").get_json()["total"] == 1
+    # picking another candidate = officer correction, which counts as verified
+    d = act(client, iid, action="correct_plate", plate="KA01AB1284").get_json()
+    assert d["plate_number"] == "KA01AB1284" and d["plate_verified"] and d["plate_corrected"]
+    assert act(client, iid, action="verify_plate").status_code == 409        # already verified
+    assert client.get("/api/v1/incidents?plate=unverified").get_json()["total"] == 0
+
+
+def test_verify_plate_only_for_vehicles_with_a_reading(client):
+    pid = post(client, meta("P-2", offender="person")).get_json()["id"]
+    assert act(client, pid, action="verify_plate").status_code == 409
+    vid = post(client, meta("P-3", plate=None)).get_json()["id"]
+    assert act(client, vid, action="verify_plate").status_code == 409
+
+
+def test_old_database_is_upgraded(tmp_path):
+    import sqlite3
+    db = tmp_path / "litterwatch.db"
+    con = sqlite3.connect(db)
+    con.executescript("""CREATE TABLE incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE,
+        camera_id TEXT, zone TEXT, ward TEXT, location TEXT, occurred_at TEXT NOT NULL, detected_at TEXT,
+        received_at TEXT NOT NULL, offender_type TEXT NOT NULL, offender_track TEXT, attribution_score REAL,
+        vehicle_class TEXT, vehicle_category TEXT, linked_track TEXT, plate_number TEXT, plate_display TEXT,
+        plate_confidence REAL, plate_valid INTEGER, plate_raw TEXT, plate_corrected INTEGER NOT NULL DEFAULT 0,
+        litter_bbox TEXT, suspects TEXT, status TEXT NOT NULL DEFAULT 'pending_review',
+        cleanup_status TEXT NOT NULL DEFAULT 'pending', cleanup_assignee TEXT, fine_amount INTEGER,
+        notice_number TEXT UNIQUE, notice_issued_at TEXT, due_date TEXT, paid_at TEXT, payment_ref TEXT,
+        rejection_reason TEXT, is_sample INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+        INSERT INTO incidents (uid, occurred_at, received_at, offender_type, updated_at)
+        VALUES ('OLD-1', '2026-10-01T10:00:00+00:00', '2026-10-01T10:00:00+00:00', 'person', 'x');""")
+    con.commit(); con.close()
+    c = create_app(Settings(api_key=KEY, data_dir=tmp_path, dashboard_dir=tmp_path / "nodist")).test_client()
+    items = c.get("/api/v1/incidents").get_json()["items"]
+    assert items[0]["uid"] == "OLD-1" and items[0]["plate_verified"] is False
